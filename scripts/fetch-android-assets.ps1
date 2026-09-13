@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 
-$aetherVersion = if ($env:AETHER_CORE_VERSION) { $env:AETHER_CORE_VERSION } else { "v1.7.0" }
+$pins = Get-Content -LiteralPath (Join-Path $PSScriptRoot "aether-pins.json") -Raw | ConvertFrom-Json
+$aetherVersion = if ($env:AETHER_CORE_VERSION) { $env:AETHER_CORE_VERSION } else { $pins.androidVersion }
 $hevVersion = "2.16.0"
 $hevCommit = "0a05221275a51a884d93328c55fc2fbc9e9b6974"
 $ndkVersion = "27.2.12479018"
@@ -73,14 +74,29 @@ try {
         $abiDir = Join-Path $destination $target.Abi
         New-Item -ItemType Directory -Force $abiDir | Out-Null
         $archive = Join-Path $temp $target.Archive
-        $checksum = "$archive.sha256"
         $base = "https://github.com/CluvexStudio/Aether/releases/download/$aetherVersion"
-        Invoke-WebRequest -UseBasicParsing "$base/$($target.Archive)" -OutFile $archive
-        Invoke-WebRequest -UseBasicParsing "$base/$($target.Archive).sha256" -OutFile $checksum
-        $expected = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split "\s+")[0]
-        if ($expected -notmatch '^[a-fA-F0-9]{64}$') { throw "Invalid Aether checksum for $($target.Abi)." }
+        $cacheArchive = if ($env:AETHER_ASSET_CACHE) { Join-Path $env:AETHER_ASSET_CACHE $target.Archive } else { $null }
+        if ($cacheArchive -and (Test-Path -LiteralPath $cacheArchive -PathType Leaf)) {
+            Copy-Item -LiteralPath $cacheArchive -Destination $archive
+        }
+        else {
+            Invoke-WebRequest -UseBasicParsing "$base/$($target.Archive)" -OutFile $archive
+        }
+        # Pinned in this repository rather than read from beside the archive it verifies:
+        # the archive and its .sha256 share one base URL and one trust boundary. See
+        # scripts/aether-pins.json.
+        if ($aetherVersion -eq $pins.androidVersion) {
+            $expected = $pins.androidArchives.($target.Archive)
+            if (-not $expected) { throw "$($target.Archive) is not pinned in scripts/aether-pins.json." }
+        }
+        else {
+            throw "Aether $aetherVersion is not pinned. Update scripts/aether-pins.json in a reviewed commit before building the Android assets against it; this script will not accept the release's own checksum file as the authority."
+        }
+        if ($expected -notmatch '^[a-fA-F0-9]{64}$') { throw "Invalid pinned Aether checksum for $($target.Abi)." }
         $actual = Get-Sha256 $archive
-        if ($actual -ne $expected.ToLowerInvariant()) { throw "Aether Android checksum mismatch for $($target.Abi)." }
+        if ($actual -ne $expected.ToLowerInvariant()) {
+            throw "Aether Android checksum mismatch for $($target.Abi). Expected $expected, got $actual."
+        }
 
         $expanded = Join-Path $temp "aether-$($target.Abi)"
         New-Item -ItemType Directory $expanded | Out-Null
@@ -93,8 +109,23 @@ try {
         finally { Pop-Location }
         $core = Get-ChildItem -LiteralPath $expanded -Recurse -File -Filter "aether" | Select-Object -First 1
         if (-not $core) { throw "Aether executable was not found in $($target.Archive)." }
-        Copy-Item -LiteralPath $core.FullName -Destination (Join-Path $abiDir "libaether.so") -Force
-        Write-Host "Prepared verified Aether core for $($target.Abi)"
+        # Verifying the archive proves the transfer; it does not prove that what tar handed back
+        # and what lands in jniLibs are the same bytes. jniLibs/**/*.so is .gitignore'd, so the
+        # copied library is otherwise the one shipped input with no reviewable expected digest.
+        $expectedBinary = $pins.androidBinary.($target.Archive)
+        if (-not $expectedBinary) { throw "$($target.Archive) has no extracted-binary digest in scripts/aether-pins.json." }
+        if ($expectedBinary -notmatch '^[a-fA-F0-9]{64}$') { throw "Invalid pinned Aether binary digest for $($target.Abi)." }
+        $extracted = Get-Sha256 $core.FullName
+        if ($extracted -ne $expectedBinary.ToLowerInvariant()) {
+            throw "Aether Android binary checksum mismatch for $($target.Abi). Expected $expectedBinary, got $extracted."
+        }
+        $installed = Join-Path $abiDir "libaether.so"
+        Copy-Item -LiteralPath $core.FullName -Destination $installed -Force
+        $placed = Get-Sha256 $installed
+        if ($placed -ne $expectedBinary.ToLowerInvariant()) {
+            throw "libaether.so for $($target.Abi) does not match its pin after copying. Expected $expectedBinary, got $placed."
+        }
+        Write-Host "Prepared verified Aether core for $($target.Abi) ($extracted)"
     }
 
     $hevSource = Join-Path $temp "hev-socks5-tunnel"

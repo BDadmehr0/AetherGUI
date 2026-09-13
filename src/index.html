@@ -30,7 +30,11 @@
     <header class="app-header">
       <button id="menuButton" class="icon-button" type="button" aria-label="Open navigation"><span class="hamburger-icon" aria-hidden="true"></span></button>
       <strong id="pageTitle">Aethon VPN</strong>
-      <button id="telegramButton" class="icon-button telegram" type="button" aria-label="Telegram"><span aria-hidden="true">➤</span></button>
+      <button id="telegramButton" class="icon-button telegram" type="button" aria-label="Telegram">
+        <svg class="telegram-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M21.8 3.2 18.7 20c-.24 1.2-.9 1.5-1.82.94l-5-3.68-2.41 2.32c-.27.27-.5.5-1.03.5l.37-5.1 9.28-8.38c.4-.37-.09-.58-.62-.2L6 13.4 1.1 11.87c-1.06-.33-1.08-1.06.22-1.57L20.45 2.84c.88-.33 1.65.2 1.35.36Z" fill="currentColor"/>
+        </svg>
+      </button>
     </header>
 
     <div id="drawerScrim" class="drawer-scrim"></div>
@@ -43,14 +47,18 @@
         <button class="nav-item active" data-view="connect"><span>◉</span><span data-i18n="nav.connect">Connect</span></button>
         <button class="nav-item" data-view="configurations"><span>≡</span><span data-i18n="nav.configurations">Configurations</span></button>
         <button class="nav-item" data-view="settings"><span>⚙</span><span data-i18n="nav.settings">Settings</span><i id="updateBadge" class="badge hidden">1</i></button>
+        <button class="nav-item" data-view="diagnostics"><span>⌁</span><span data-i18n="nav.diagnostics">Diagnostics</span></button>
         <button class="nav-item" data-view="about"><span>ⓘ</span><span data-i18n="nav.about">About</span></button>
       </nav>
-      <div class="drawer-footer"><span id="drawerState" data-i18n="status.disconnected">Disconnected</span><small>v2.0.0</small></div>
+      <div class="drawer-footer"><span id="drawerState" data-i18n="status.disconnected">Disconnected</span><small>v2.1.1</small></div>
     </aside>
 
     <main>
       <section id="view-connect" class="view active home-view">
         <div class="orb-wrap">
+          <div id="mercuryVisual" class="mercury-visual" aria-hidden="true">
+            <canvas id="mercuryCanvas" class="mercury-canvas"></canvas>
+          </div>
           <button id="connectionOrb" class="connection-orb disconnected" type="button">
             <span class="orb-light"></span>
             <span class="power-icon" aria-hidden="true"></span>
@@ -62,17 +70,17 @@
         <p id="statusMessage" class="status-message"></p>
         <div id="connectionInfo" class="connection-info">
           <div class="traffic-row">
-            <span class="traffic-metric"><span data-i18n="traffic.upload">Upload Traffic</span><strong id="uploadTraffic">--</strong></span>
-            <span class="traffic-metric"><span data-i18n="traffic.download">Download Traffic</span><strong id="downloadTraffic">--</strong></span>
+            <span class="traffic-metric download-metric"><span data-i18n="traffic.download">Download</span><strong id="downloadTraffic">--</strong></span>
+            <span class="traffic-metric ping-metric"><span data-i18n="traffic.ping">Ping</span><strong id="pingValue">--</strong></span>
+            <span class="traffic-metric upload-metric"><span data-i18n="traffic.upload">Upload</span><strong id="uploadTraffic">--</strong></span>
           </div>
-          <div id="pingValue"><strong>Ping: --</strong></div>
-          <div id="locationValue">Location unavailable</div>
+          <div class="location-row"><span data-i18n="traffic.location">Location</span><strong id="locationValue">&mdash;</strong></div>
         </div>
       </section>
 
       <section id="view-about" class="view scroll-view about-view">
         <h1 data-i18n="about.title">About</h1>
-        <div class="about-hero"><div class="about-mark">A</div><strong>Aethon VPN</strong><small>v2.0.0</small></div>
+        <div class="about-hero"><div class="about-mark">A</div><strong>Aethon VPN</strong><small>v2.1.1</small></div>
         <section class="section-block about">
           <b data-i18n="about.original">Original Project: Aether</b>
           <p data-i18n="about.originalCredit">Based on the original Aether project by CluvexStudio.</p>
@@ -87,23 +95,26 @@
         <h1 data-i18n="nav.configurations">Configurations</h1>
         <section class="section-block">
           <label data-i18n="config.mode">Connection Mode</label>
-          <div id="connectionMode" class="segmented three">
+          <div id="connectionMode" class="segmented two">
             <button data-value="vpn" class="active" data-i18n="config.vpn">Device VPN</button>
-            <button data-value="smart" data-i18n="config.smart">Smart Connect</button>
             <button data-value="manual" data-i18n="config.proxy">SOCKS5 Proxy</button>
           </div>
         </section>
         <section class="section-block">
           <label data-i18n="config.protocol">Protocol</label>
-          <div id="protocol" class="segmented three">
-            <button data-value="masque">MASQUE</button><button data-value="wg">WireGuard</button><button data-value="gool" class="active">gool</button>
+          <div id="protocol" class="segmented four">
+            <button data-value="smart">Smart Connect</button><button data-value="masque">MASQUE</button><button data-value="wg">WireGuard</button><button data-value="gool" class="active">gool</button>
           </div>
           <label for="scanMode" data-i18n="config.scan">Scan Mode</label><select id="scanMode"></select>
+          <label for="obfuscation" data-i18n="config.obfuscation">Obfuscation</label><select id="obfuscation"></select>
           <div id="transportField" class="field hidden"><label data-i18n="config.transport">MASQUE Transport</label><div id="transport" class="segmented"><button data-value="h3" class="active">HTTP/3</button><button data-value="h2">HTTP/2</button></div></div>
           <label for="peer" data-i18n="config.endpoint">Custom Endpoint</label><input id="peer" placeholder="Automatic" spellcheck="false">
         </section>
         <section class="section-block switches">
+          <label class="switch-row"><span><b>Auto connect at start</b><small>Reconnect with the saved configuration when Aethon launches</small></span><input id="autoConnectAtStart" type="checkbox"></label>
           <label class="switch-row"><span><b data-i18n="config.reconnect">Auto Reconnect</b><small data-i18n="config.reconnectHelp">Recover after temporary failures</small></span><input id="quickReconnect" type="checkbox" checked></label>
+          <label class="switch-row"><span><b data-i18n="config.lan">Connection from LAN</b><small data-i18n="config.lanHelp">Allow trusted private-network devices to use Aethon</small></span><input id="allowRemoteListener" type="checkbox"></label>
+          <div id="lanAddressValue" class="section-help">LAN sharing disabled</div>
           <label class="switch-row"><span><b data-i18n="config.dns">Private DNS Routing</b><small data-i18n="config.dnsHelp">Route DNS through Aethon</small></span><input id="dnsLeakProtection" type="checkbox" checked></label>
           <label class="switch-row"><span><b data-i18n="config.kill">Fail Closed</b><small data-i18n="config.killHelp">Block traffic while recovering</small></span><input id="killSwitch" type="checkbox"></label>
         </section>
@@ -121,6 +132,7 @@
         <h1 data-i18n="nav.settings">Settings</h1>
         <section class="section-block">
           <label for="appearance" data-i18n="settings.appearance">Appearance</label><select id="appearance"><option value="system" data-i18n="settings.system">System</option><option value="light" data-i18n="settings.light">Light</option><option value="dark" data-i18n="settings.dark">Dark</option></select>
+          <label for="orbStyle" data-i18n="settings.orbStyle">Orb Style</label><select id="orbStyle"><option value="classic" data-i18n="settings.orbClassic">Classic</option><option value="living-mercury" data-i18n="settings.orbMercury">Living Mercury</option></select>
           <label for="language" data-i18n="settings.language">Language</label><select id="language"><option value="en">English</option><option value="fa">فارسی</option></select>
         </section>
         <section class="section-block">
@@ -130,10 +142,26 @@
         </section>
         <section class="section-block switches">
           <label class="switch-row"><span><b data-i18n="updates.automatic">Automatic Updates</b><small data-i18n="updates.automaticHelp">Check silently in the background</small></span><input id="automaticUpdates" type="checkbox" checked></label>
-          <div class="update-row"><span><b data-i18n="updates.current">Current Version</b><small id="updateStatus" data-i18n="updates.notChecked">Not checked</small></span><strong id="currentVersion">2.0.0</strong></div>
+          <div class="update-row"><span><b data-i18n="updates.current">Current Version</b><small id="updateStatus" data-i18n="updates.notChecked">Not checked</small></span><strong id="currentVersion">2.1.1</strong></div>
           <progress id="updateProgress" class="hidden" max="100" value="0"></progress>
           <div class="button-row"><button id="checkUpdates" class="secondary-button" type="button" data-i18n="updates.check">Check for Updates</button><button id="updateAction" class="primary-button hidden" type="button" data-i18n="updates.download">Download</button></div>
         </section>
+      </section>
+
+      <section id="view-diagnostics" class="view scroll-view">
+        <h1 data-i18n="nav.diagnostics">Diagnostics</h1>
+        <section class="section-block diagnostics-grid">
+          <div><span>Protocol</span><strong id="diagProtocol">--</strong></div>
+          <div><span>TUN interface</span><strong id="diagTun">--</strong></div>
+          <div><span>Runtime MTU</span><strong id="diagMtu">--</strong></div>
+          <div><span>Exit IP</span><strong id="diagExitIp">--</strong></div>
+          <div><span>Ping</span><strong id="diagPing">--</strong></div>
+          <div><span>Traffic</span><strong id="diagTraffic">--</strong></div>
+          <div><span>Tunnel</span><strong id="diagState">--</strong></div>
+          <div><span>Aether Core</span><strong id="diagAetherVersion">--</strong></div>
+          <div><span>Aether / Xray</span><strong id="diagProcesses">--</strong></div>
+        </section>
+        <button id="refreshDiagnostics" class="secondary-button full-width" type="button">Refresh</button>
       </section>
     </main>
   </div>

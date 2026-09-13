@@ -159,7 +159,9 @@ public final class ConnectionOrbView extends View {
 
     private void restartMotion() {
         stopMotion();
-        if (!isShown() || !ValueAnimator.areAnimatorsEnabled() || state == ERROR) { phase = 0f; invalidate(); return; }
+        // Continuous idle redraws were a measurable UI/GPU cost. Only transition states need motion;
+        // connected and disconnected states remain visually complete as static frames.
+        if (!isShown() || !ValueAnimator.areAnimatorsEnabled() || state == ERROR || state == CONNECTED || state == DISCONNECTED) { phase = 0f; invalidate(); return; }
         motion = ValueAnimator.ofFloat(0f, 1f);
         motion.setDuration(state == CONNECTING ? 1450 : state == DISCONNECTING ? 900 : state == DISCONNECTED ? 4200 : 3200);
         motion.setRepeatCount(state == DISCONNECTING ? 0 : ValueAnimator.INFINITE);

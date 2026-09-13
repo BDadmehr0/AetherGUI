@@ -1,11 +1,20 @@
+#![cfg_attr(test, allow(clippy::field_reassign_with_default))]
+
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, path::Path};
+
+/// Transport encapsulation ceilings for the TUN MTU.
+pub const MASQUE_MTU_CAP: u16 = 1400;
+pub const WIREGUARD_MTU_CAP: u16 = 1420;
+pub const NESTED_WIREGUARD_MTU_CAP: u16 = 1360;
+pub const MIN_TUN_MTU: u16 = 1280;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub language: String,
     pub appearance: String,
+    pub orb_style: String,
     #[serde(default = "default_automatic_updates")]
     pub automatic_updates: bool,
     pub connection_mode: String,
@@ -32,10 +41,17 @@ pub struct Settings {
     pub wg_config_path: String,
     pub masque_config_path: String,
     pub quick_reconnect: bool,
+    pub auto_connect_at_start: bool,
     pub dns_resolvers: String,
     pub route_block: Vec<String>,
     pub route_direct: Vec<String>,
     pub routes_file: String,
+    #[serde(default)]
+    pub psiphon_chain_enabled: bool,
+    #[serde(default)]
+    pub psiphon_region: String,
+    #[serde(default)]
+    pub psiphon_local_port: u16,
 }
 
 fn default_automatic_updates() -> bool {
@@ -46,7 +62,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             language: "en".into(),
-            appearance: "dark".into(),
+            appearance: "system".into(),
+            orb_style: "living-mercury".into(),
             automatic_updates: true,
             connection_mode: "vpn".into(),
             routing_mode: "bypass-local".into(),
@@ -57,7 +74,7 @@ impl Default for Settings {
             split_applications: Vec::new(),
             route_exclusions: Vec::new(),
             protocol: "gool".into(),
-            scan_mode: "turbo".into(),
+            scan_mode: "balanced".into(),
             log_level: "info".into(),
             ip_mode: "v4".into(),
             obfuscation: "balanced".into(),
@@ -72,22 +89,47 @@ impl Default for Settings {
             wg_config_path: String::new(),
             masque_config_path: String::new(),
             quick_reconnect: true,
+            auto_connect_at_start: false,
             dns_resolvers: String::new(),
             route_block: Vec::new(),
             route_direct: Vec::new(),
             routes_file: String::new(),
+            psiphon_chain_enabled: false,
+            psiphon_region: String::new(),
+            psiphon_local_port: 0,
         }
     }
 }
 
 impl Settings {
+    /// Largest safe TUN MTU for the selected transport. MASQUE adds QUIC/HTTP datagram framing,
+    /// WireGuard adds its own 60-byte header, and `gool` nests WireGuard inside WireGuard, so a
+    /// 1500-byte TUN would force every packet to fragment on the way out. Mirrors
+    /// `AetherVpnService.effectiveMtu` on Android so both platforms agree.
+    pub fn effective_tun_mtu(&self) -> u16 {
+        Self::cap_tun_mtu(&self.protocol, self.tun_mtu)
+    }
+
+    pub fn cap_tun_mtu(protocol: &str, configured: u16) -> u16 {
+        let transport_cap = match protocol {
+            "gool" | "smart" => NESTED_WIREGUARD_MTU_CAP,
+            "wg" => WIREGUARD_MTU_CAP,
+            _ => MASQUE_MTU_CAP,
+        };
+        configured.min(transport_cap).max(MIN_TUN_MTU)
+    }
+
+    /// True only when the Aether core actually carries IPv6 upstream. When it does not, IPv6 has
+    /// to be rejected rather than forwarded into an IPv4-only tunnel.
+    pub fn ipv6_upstream(&self) -> bool {
+        self.ipv6_behavior == "tunnel" && matches!(self.ip_mode.as_str(), "v6" | "both")
+    }
+
     /// Migrate protocol-specific values from older Windows UI versions before validation.
     pub fn normalize_protocol_options(&mut self) {
-        if self.protocol == "masque" {
-            if !["firewall", "gfw", "off"].contains(&self.obfuscation.as_str()) {
-                self.obfuscation = "firewall".into();
-            }
-        } else if !["balanced", "aggressive", "light", "off"].contains(&self.obfuscation.as_str()) {
+        if !["firewall", "gfw", "balanced", "aggressive", "off"]
+            .contains(&self.obfuscation.as_str())
+        {
             self.obfuscation = "balanced".into();
         }
         if !["h3", "h2"].contains(&self.masque_transport.as_str()) {
@@ -96,11 +138,8 @@ impl Settings {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        one_of(
-            "connection mode",
-            &self.connection_mode,
-            &["vpn", "smart", "manual"],
-        )?;
+        one_of("connection mode", &self.connection_mode, &["vpn", "manual"])?;
+        one_of("orb style", &self.orb_style, &["classic", "living-mercury"])?;
         one_of(
             "routing mode",
             &self.routing_mode,
@@ -127,7 +166,11 @@ impl Settings {
                 return Err("Route exclusions must be CIDR addresses".into());
             }
         }
-        one_of("protocol", &self.protocol, &["masque", "wg", "gool"])?;
+        one_of(
+            "protocol",
+            &self.protocol,
+            &["smart", "masque", "wg", "gool"],
+        )?;
         one_of(
             "scan mode",
             &self.scan_mode,
@@ -140,12 +183,11 @@ impl Settings {
         )?;
         one_of("IP mode", &self.ip_mode, &["v4", "v6", "both"])?;
         one_of("MASQUE transport", &self.masque_transport, &["h3", "h2"])?;
-        let profiles = if self.protocol == "masque" {
-            &["firewall", "gfw", "off"][..]
-        } else {
-            &["balanced", "aggressive", "light", "off"][..]
-        };
-        one_of("obfuscation profile", &self.obfuscation, profiles)?;
+        one_of(
+            "obfuscation profile",
+            &self.obfuscation,
+            &["firewall", "gfw", "balanced", "aggressive", "off"],
+        )?;
         let listen: SocketAddr = self.socks_address.parse().map_err(|_| {
             "SOCKS5 address must be an IP address and port, for example 127.0.0.1:1819".to_string()
         })?;
@@ -195,6 +237,8 @@ impl Settings {
                 return Err(format!("Invalid {label} routing rule"));
             }
         }
+        // Psiphon settings remain deserializable for backward compatibility, but the
+        // suspended production build deliberately ignores them and never starts Psiphon.
         Ok(())
     }
 
@@ -280,19 +324,34 @@ mod tests {
     use super::*;
     #[test]
     fn defaults_map_to_documented_environment() {
-        let env = Settings::default()
+        let settings = Settings::default();
+        assert_eq!(settings.scan_mode, "balanced");
+        assert_eq!(settings.obfuscation, "balanced");
+        let env = settings
             .environment(Path::new("C:/data/aether.toml"))
             .unwrap();
         assert_eq!(env["AETHER_PROTOCOL"], "gool");
         assert_eq!(env["AETHER_SOCKS"], "127.0.0.1:1819");
     }
+
     #[test]
-    fn protocol_profiles_are_enforced() {
+    fn saved_scan_and_obfuscation_values_override_new_user_defaults() {
+        let saved: Settings =
+            serde_json::from_str(r#"{"scanMode":"thorough","obfuscation":"firewall"}"#).unwrap();
+        assert_eq!(saved.scan_mode, "thorough");
+        assert_eq!(saved.obfuscation, "firewall");
+    }
+    #[test]
+    fn android_obfuscation_profiles_are_supported_for_all_protocols() {
         let mut s = Settings::default();
         s.protocol = "wg".into();
         assert!(s.validate().is_ok());
         s.obfuscation = "firewall".into();
-        assert!(s.validate().is_err());
+        assert!(s.validate().is_ok());
+        for profile in ["gfw", "balanced", "aggressive", "off"] {
+            s.obfuscation = profile.into();
+            assert!(s.validate().is_ok(), "profile {profile} should be accepted");
+        }
     }
     #[test]
     fn masque_legacy_obfuscation_is_migrated_without_touching_scan_mode() {
@@ -302,11 +361,44 @@ mod tests {
         settings.scan_mode = "ironclad".into();
         settings.masque_transport = "invalid".into();
         settings.normalize_protocol_options();
-        assert_eq!(settings.obfuscation, "firewall");
+        assert_eq!(settings.obfuscation, "balanced");
         assert_eq!(settings.masque_transport, "h3");
         assert_eq!(settings.scan_mode, "ironclad");
         assert!(settings.validate().is_ok());
     }
+    #[test]
+    fn tun_mtu_never_exceeds_transport_encapsulation_limits() {
+        let mut settings = Settings::default();
+        settings.tun_mtu = 1500;
+        settings.protocol = "gool".into();
+        assert_eq!(settings.effective_tun_mtu(), 1360);
+        settings.protocol = "wg".into();
+        assert_eq!(settings.effective_tun_mtu(), 1420);
+        settings.protocol = "masque".into();
+        assert_eq!(settings.effective_tun_mtu(), 1400);
+        // A safe user value is preserved, and the IPv6 minimum is still the floor.
+        settings.tun_mtu = 1320;
+        assert_eq!(settings.effective_tun_mtu(), 1320);
+        settings.tun_mtu = 1280;
+        settings.protocol = "gool".into();
+        assert_eq!(settings.effective_tun_mtu(), 1280);
+        assert_eq!(Settings::cap_tun_mtu("gool", 1281), 1281);
+    }
+
+    #[test]
+    fn ipv6_upstream_requires_both_tunnelling_and_an_ipv6_core() {
+        let mut settings = Settings::default();
+        settings.ipv6_behavior = "tunnel".into();
+        settings.ip_mode = "v4".into();
+        assert!(!settings.ipv6_upstream());
+        settings.ip_mode = "v6".into();
+        assert!(settings.ipv6_upstream());
+        settings.ip_mode = "both".into();
+        assert!(settings.ipv6_upstream());
+        settings.ipv6_behavior = "block".into();
+        assert!(!settings.ipv6_upstream());
+    }
+
     #[test]
     fn non_loopback_listener_is_rejected() {
         let mut s = Settings::default();

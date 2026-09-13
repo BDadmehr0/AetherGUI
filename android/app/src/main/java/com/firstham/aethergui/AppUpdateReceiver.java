@@ -105,6 +105,22 @@ public final class AppUpdateReceiver extends BroadcastReceiver {
             context.startActivity(permission);
             return;
         }
+        // The download was verified when it landed, but the file has been sitting in shared
+        // external storage since then. Re-check the digest and the signer immediately before
+        // handing the package to the installer.
+        try {
+            String expected = prefs.getString(UpdateConfig.KEY_CHECKSUM, "").trim().toLowerCase(java.util.Locale.US);
+            if (expected.isEmpty() || !expected.equalsIgnoreCase(AppUpdateManager.sha256(apk))) {
+                throw new SecurityException("APK checksum mismatch");
+            }
+            if (!sameSigner(context, apk)) throw new SecurityException("APK signing certificate mismatch");
+        } catch (Throwable error) {
+            prefs.edit().putString("status", "verification_failed").remove(UpdateConfig.KEY_APK_PATH).apply();
+            if (!apk.delete()) apk.deleteOnExit();
+            AppUpdateManager.sendState(context);
+            AppUpdateManager.notifyFailure(context, R.string.update_verification_failed);
+            return;
+        }
         Uri uri = FileProvider.getUriForFile(context, context.getPackageName() + ".updates", apk);
         Intent install = new Intent(Intent.ACTION_INSTALL_PACKAGE).setData(uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
         prefs.edit().putString("status", "installing").apply();

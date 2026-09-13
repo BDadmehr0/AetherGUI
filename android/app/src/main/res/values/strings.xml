@@ -1,10 +1,10 @@
 <resources>
     <string name="app_name">Aethon VPN</string>
-    <string name="app_version" translatable="false">v2.0.0</string>
+    <string name="app_version" translatable="false">v2.1.1</string>
     <string name="version_format" translatable="false">v%1$s</string>
     <string name="channel_url" translatable="false">https://t.me/hamvex</string>
     <string name="default_socks_address" translatable="false">127.0.0.1:1819</string>
-    <string name="default_mtu" translatable="false">1500</string>
+    <string name="default_mtu" translatable="false">1360</string>
 
     <string name="nav_connect">Connect</string>
     <string name="nav_configurations">Configurations</string>
@@ -21,7 +21,9 @@
     <string name="disconnecting">DISCONNECTING…</string>
     <string name="status_disconnected">Aethon Ready</string>
     <string name="status_connected">Aethon Active</string>
+    <string name="status_connected_via_smart">Aethon Active • %1$s</string>
     <string name="status_connecting">Connecting…</string>
+    <string name="status_checking">Checking…</string>
     <string name="tap_to_secure">Tap to secure</string>
     <string name="status_ready_message"></string>
     <string name="status_protected">You are protected</string>
@@ -62,16 +64,25 @@
     <string name="hide_advanced">Hide advanced</string>
     <string name="ip_scan">IP scan</string>
     <string name="obfuscation">Obfuscation</string>
-    <string name="log_level">Aethon log level</string>
+    <string name="log_level" translatable="false"></string>
     <string name="socks_address">Local SOCKS5 address</string>
     <string name="custom_endpoint">Custom endpoint (optional)</string>
     <string name="mtu">VPN MTU</string>
+    <string name="mtu_automatic">Automatic</string>
+    <string name="mtu_manual">Manual</string>
+    <string name="mtu_manual_value">Manual MTU (1280-1500)</string>
+    <string name="mtu_summary">Safe default: 1360</string>
+    <string name="mtu_automatic_summary">Probe the current network and use the largest stable MTU.</string>
+    <string name="mtu_manual_summary">Use the configured MTU for the tunnel and transport.</string>
+    <string name="invalid_mtu">Enter an MTU from 1280 to 1500.</string>
     <string name="dns_protection">Private DNS routing</string>
     <string name="dns_protection_summary">Route DNS requests through the tunnel</string>
     <string name="kill_switch">Fail closed on tunnel errors</string>
     <string name="kill_switch_summary">Keep VPN routes blocked if Aethon unexpectedly stops</string>
     <string name="quick_reconnect">Auto Reconnect</string>
     <string name="quick_reconnect_summary">Recover automatically after a temporary connection failure</string>
+    <string name="auto_connect_at_start">Auto connect at start</string>
+    <string name="auto_connect_at_start_summary">Connect with the saved configuration when Aethon opens</string>
     <string name="reset_defaults">Reset defaults</string>
 
     <string name="split_tunneling">Split Tunneling</string>
@@ -108,6 +119,7 @@
     <string name="about_summary">Aethon VPN for Android</string>
     <string name="original_project">Original Project: Aether</string>
     <string name="aether_credit">Based on the original Aether project by CluvexStudio.</string>
+    <string name="aether_core_version">Aether Core v1.9.0</string>
     <string name="aether_repository" translatable="false">https://github.com/CluvexStudio/Aether</string>
     <string name="application_project">Application: Aethon VPN</string>
     <string name="aethon_credit">Android application/interface developed for Aether.</string>
@@ -119,10 +131,17 @@
 
     <string name="tile_name">Aethon VPN</string>
     <string name="tile_connected">Connected</string>
+    <string name="tile_connecting">Connecting</string>
+    <string name="tile_blocked">Blocked - tap to disconnect</string>
+    <string name="tile_error">Needs attention - tap to retry</string>
     <string name="tile_disconnected">Disconnected</string>
     <string name="tile_unavailable">Unavailable</string>
     <string name="notification_channel">Aethon VPN</string>
     <string name="notification_channel_summary">Aethon VPN connection status</string>
+    <string name="notification_alert_channel">Aethon VPN alerts</string>
+    <string name="notification_alert_channel_summary">Warnings when the Aethon tunnel stops protecting traffic</string>
+    <string name="service_protection_lost_title">Aethon VPN is no longer protecting this device</string>
+    <string name="service_protection_lost">Traffic is unprotected: %1$s</string>
     <string name="service_preparing">Preparing a secure connection</string>
     <string name="service_launching">Launching the Aethon core</string>
     <string name="service_disconnecting">Closing the tunnel safely</string>
@@ -132,6 +151,7 @@
     <string name="service_proxy_ready">Local SOCKS5 proxy is ready</string>
     <string name="service_proxy_connected">SOCKS5 proxy is connected</string>
     <string name="service_protected">Your device traffic is protected</string>
+    <string name="service_traffic_checking">Verifying internet traffic</string>
     <string name="service_smart_protected">Protected with Smart Connect</string>
     <string name="service_aethon_protected">Protected through Aethon VPN</string>
     <string name="service_blocked">Tunnel stopped; network remains blocked by fail-closed mode</string>
@@ -143,9 +163,16 @@
     <string name="service_restored">Connection restored</string>
     <string name="service_testing_protocol">Testing %1$s (%2$d/%3$d)</string>
     <string name="service_reconnect_failed">Aethon VPN could not recover after %1$d attempts</string>
+    <string name="service_gool_checking_exit">Checking gool exit country</string>
+    <string name="service_gool_rejecting_iran">Iran exit rejected; selecting another route (%1$d/%2$d)</string>
+    <string name="service_gool_iran_failed">Every available gool route exited through Iran after %1$d retries.</string>
+    <string name="service_gool_country_unavailable">Aethon could not verify the gool exit country.</string>
     <string name="service_network_lost">Network unavailable; waiting to reconnect</string>
     <string name="service_network_restored">Network changed; restoring the secure route</string>
     <string name="service_tunnel_unresponsive">Tunnel health check failed; reconnecting</string>
+    <string name="service_connect_timeout">Connection did not complete in time; Aethon cleaned up instead of waiting</string>
+    <string name="service_connect_retry">First attempt failed; cleaning up and retrying once</string>
+    <string name="service_stale_core_cleared">Cleared a leftover Aethon core process before connecting</string>
 
     <string name="invalid_socks">Enter a valid host:port SOCKS5 address.</string>
     <string name="vpn_permission_denied">VPN permission is required for Device VPN mode.</string>
@@ -180,4 +207,29 @@
     <string name="install_permission_required">Allow Aethon VPN to install updates, then try again.</string>
     <string name="update_download_started">Update download started.</string>
     <string name="update_no_download">No verified update is ready to install.</string>
+    <string name="widget_active">Aethon Active</string>
+    <string name="widget_disconnected">Disconnected</string>
+    <string name="widget_connect">Connect</string>
+    <string name="widget_disconnect">Disconnect</string>
+    <string name="widget_connecting">Connecting...</string>
+    <string name="widget_disconnecting">Disconnecting...</string>
+    <string name="widget_location_unavailable">Location unavailable</string>
+    <string name="widget_ping">Ping: %1$s</string>
+    <string name="backup_restore">Backup &amp; Restore</string>
+    <string name="backup_settings">Export settings</string>
+    <string name="restore_settings">Import settings</string>
+    <string name="backup_exported">Settings backup exported.</string>
+    <string name="backup_restored">Settings restored.</string>
+    <string name="backup_failed">Could not process settings backup.</string>
+    <string name="restore_confirmation">Importing will replace compatible application settings. Continue?</string>
+    <string name="connection_from_lan">Connection from LAN</string>
+    <string name="connection_from_lan_summary">Allow local network devices to use the active Aethon tunnel.</string>
+    <string name="lan_enabled">Enabled</string>
+    <string name="lan_disabled">Disabled</string>
+    <string name="lan_pending">LAN sharing will start when VPN connects.</string>
+    <string name="lan_address">Local address: %1$s:%2$d</string>
+    <string name="lan_protocol">Protocol: SOCKS5</string>
+    <string name="lan_credentials">Protocol: SOCKS5 • user %1$s • pass %2$s</string>
+    <string name="copy_address">Copy address</string>
+    <string name="copy_port">Copy port</string>
 </resources>
