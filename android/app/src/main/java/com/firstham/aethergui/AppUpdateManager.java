@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Locale;
@@ -37,12 +38,15 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import javax.net.ssl.HttpsURLConnection;
 
 final class AppUpdateManager {
     private static final String CHANNEL_ID = "aether_app_updates";
     private static final int NOTIFICATION_ID = 2901;
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
     private static final AtomicBoolean CHECKING = new AtomicBoolean();
+    /** Minimum spacing between automatic update checks against the unauthenticated GitHub API. */
+    private static final long CHECK_INTERVAL_MS = TimeUnit.HOURS.toMillis(6);
 
     interface Listener { void onComplete(); void onError(Throwable error); }
 
@@ -69,7 +73,20 @@ final class AppUpdateManager {
     }
 
     static void checkNow(Context context, Listener listener) {
+        checkNow(context, listener, false);
+    }
+
+    /**
+     * Every MainActivity creation used to hit the GitHub API, so a rotation or theme switch burned
+     * a request from the unauthenticated quota. Automatic checks now honour a minimum interval;
+     * only an explicit user action forces one.
+     */
+    static void checkNow(Context context, Listener listener, boolean force) {
         Context app = context.getApplicationContext();
+        if (!force && !checkIntervalElapsed(app)) {
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(listener::onComplete);
+            return;
+        }
         if (!CHECKING.compareAndSet(false, true)) {
             new android.os.Handler(android.os.Looper.getMainLooper()).post(listener::onComplete);
             return;
@@ -91,34 +108,35 @@ final class AppUpdateManager {
         });
     }
 
+    static boolean checkIntervalElapsed(Context context) {
+        long last = context.getSharedPreferences(UpdateConfig.PREFS, Context.MODE_PRIVATE)
+                .getLong(UpdateConfig.KEY_LAST_CHECKED_AT, 0L);
+        return checkIntervalElapsed(last, System.currentTimeMillis());
+    }
+
+    static boolean checkIntervalElapsed(long lastCheckedAt, long now) {
+        if (lastCheckedAt <= 0L) return true;
+        // A clock that moved backwards must not lock checking out until it catches up.
+        if (lastCheckedAt > now) return true;
+        return now - lastCheckedAt >= CHECK_INTERVAL_MS;
+    }
+
     static synchronized void checkBlocking(Context context) throws IOException {
-        JSONArray releases = getJsonArray(UpdateConfig.API_URL);
-        JSONObject release = null;
-        String tag = "";
-        JSONObject apk = null;
-        for (int i = 0; i < releases.length(); i++) {
-            JSONObject candidate = releases.optJSONObject(i);
-            if (candidate == null) continue;
-            String candidateTag = candidate.optString("tag_name", "").replaceFirst("^v", "");
-            if (candidateTag.isEmpty() || compareVersions(candidateTag, BuildConfig.VERSION_NAME) <= 0) continue;
-            JSONObject candidateApk = findAsset(candidate.optJSONArray("assets"), String.format(Locale.US, UpdateConfig.RELEASE_ASSET, candidateTag));
-            if (candidateApk != null) {
-                release = candidate;
-                tag = candidateTag;
-                apk = candidateApk;
-                break;
-            }
+        JSONObject release = latestRelease();
+        String tag = release.optString("tag_name", "").replaceFirst("^v", "");
+        if (tag.isEmpty()) throw new IOException("No published GitHub release is available");
+        android.content.SharedPreferences prefs = context.getSharedPreferences(UpdateConfig.PREFS, Context.MODE_PRIVATE);
+        prefs.edit()
+                .putString(UpdateConfig.KEY_LATEST_VERSION, tag)
+                .putLong(UpdateConfig.KEY_LAST_CHECKED_AT, System.currentTimeMillis())
+                .apply();
+        if (compareVersions(tag, BuildConfig.VERSION_NAME) <= 0) {
+            prefs.edit().putString("status", "up_to_date").remove(UpdateConfig.KEY_DOWNLOAD_URL).remove(UpdateConfig.KEY_CHECKSUM).apply();
+            sendState(context);
+            return;
         }
-        if (release == null) {
-            for (int i = 0; i < releases.length(); i++) {
-                JSONObject candidate = releases.optJSONObject(i);
-                if (candidate == null) continue;
-                String candidateTag = candidate.optString("tag_name", "").replaceFirst("^v", "");
-                JSONObject candidateApk = findAsset(candidate.optJSONArray("assets"), String.format(Locale.US, UpdateConfig.RELEASE_ASSET, candidateTag));
-                if (candidateApk != null) { release = candidate; tag = candidateTag; apk = candidateApk; break; }
-            }
-        }
-        if (release == null || apk == null || tag.isEmpty()) throw new IOException("No Android update package is available");
+        JSONObject apk = findAsset(release.optJSONArray("assets"), String.format(Locale.US, UpdateConfig.RELEASE_ASSET, tag));
+        if (apk == null) throw new IOException("The latest release has no Android update package");
         String downloadUrl = apk.optString("browser_download_url", "");
         if (!downloadUrl.startsWith(UpdateConfig.RELEASE_DOWNLOAD_PREFIX)) throw new IOException("The update URL is not an official Aethon release");
         String checksum = apk.optString("digest", "").replaceFirst("^sha256:", "");
@@ -132,7 +150,6 @@ final class AppUpdateManager {
         }
         if (checksum.isEmpty()) throw new IOException("The Android APK has no checksum");
         UpdateInfo info = new UpdateInfo(tag, release.optString("body", ""), downloadUrl, checksum);
-        android.content.SharedPreferences prefs = context.getSharedPreferences(UpdateConfig.PREFS, Context.MODE_PRIVATE);
         prefs.edit().putString(UpdateConfig.KEY_LATEST_VERSION, info.version).putString(UpdateConfig.KEY_RELEASE_NOTES, info.notes)
                 .putString(UpdateConfig.KEY_DOWNLOAD_URL, info.downloadUrl).putString(UpdateConfig.KEY_CHECKSUM, info.checksum).apply();
         if (compareVersions(info.version, BuildConfig.VERSION_NAME) > 0) {
@@ -275,6 +292,33 @@ final class AppUpdateManager {
         for (int i = 0; i < assets.length(); i++) { JSONObject item = assets.optJSONObject(i); if (item != null && name.equals(item.optString("name"))) return item; }
         return null;
     }
+    /**
+     * GitHub's latest-release endpoint already resolves the newest non-draft, non-prerelease entry
+     * in a single request. The paged listing is kept only as a fallback for the case where that
+     * endpoint is unavailable.
+     */
+    private static JSONObject latestRelease() throws IOException {
+        try {
+            JSONObject release = getJson(UpdateConfig.LATEST_API_URL);
+            if (!release.optBoolean("draft") && !release.optBoolean("prerelease")
+                    && !release.optString("tag_name", "").isEmpty()) {
+                return release;
+            }
+        } catch (IOException ignored) { }
+        JSONArray releases = getJsonArray(UpdateConfig.API_URL);
+        JSONObject best = null;
+        String bestTag = "";
+        for (int i = 0; i < releases.length(); i++) {
+            JSONObject candidate = releases.optJSONObject(i);
+            if (candidate == null || candidate.optBoolean("draft") || candidate.optBoolean("prerelease")) continue;
+            String candidateTag = candidate.optString("tag_name", "").replaceFirst("^v", "");
+            if (candidateTag.isEmpty()) continue;
+            if (best == null || compareVersions(candidateTag, bestTag) > 0) { best = candidate; bestTag = candidateTag; }
+        }
+        if (best == null) throw new IOException("No published GitHub release is available");
+        return best;
+    }
+
     private static JSONObject getJson(String url) throws IOException {
         try { return new JSONObject(getText(url)); }
         catch (org.json.JSONException error) { throw new IOException("Invalid update metadata", error); }
@@ -284,8 +328,24 @@ final class AppUpdateManager {
         try { return new JSONArray(getText(url)); }
         catch (org.json.JSONException error) { throw new IOException("Invalid update metadata", error); }
     }
+    /**
+     * Open {@code url} only if it resolves to HTTPS.
+     *
+     * <p>Every URL that reaches here today is either a compile-time constant or has
+     * been prefix-checked against {@link UpdateConfig#RELEASE_DOWNLOAD_PREFIX}, so this
+     * is a backstop rather than the primary control. It matters because it is what
+     * guarantees the connection is an {@link HttpsURLConnection} — which verifies the
+     * peer's hostname by default — so no future caller can fetch update metadata or a
+     * checksum list over a channel someone on the path could rewrite.
+     */
+    static HttpURLConnection openHttpsOnly(String url) throws IOException {
+        URLConnection connection = new URL(url).openConnection();
+        if (!(connection instanceof HttpsURLConnection)) throw new IOException("Refusing a non-HTTPS update URL");
+        return (HttpURLConnection) connection;
+    }
+
     private static String getText(String url) throws IOException {
-        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        HttpURLConnection connection = openHttpsOnly(url);
         connection.setConnectTimeout(15_000); connection.setReadTimeout(30_000); connection.setRequestProperty("User-Agent", "Aethon-Android"); connection.setRequestProperty("Accept", "application/vnd.github+json");
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
             StringBuilder result = new StringBuilder(); String line; while ((line = reader.readLine()) != null) result.append(line).append('\n'); return result.toString();

@@ -22,4 +22,9 @@
     <color name="on_hero">#FFFFFF</color>
     <color name="log_surface">#071C35</color>
     <color name="log_text">#E7F2FF</color>
+    <color name="widget_surface">#FFFFFF</color>
+    <color name="widget_border">#DCE7F4</color>
+    <color name="widget_text">#12233C</color>
+    <color name="widget_muted">#64748B</color>
+    <color name="widget_accent">#1769E0</color>
 </resources>

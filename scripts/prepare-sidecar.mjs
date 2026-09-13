@@ -3,7 +3,6 @@ import { resolve } from "node:path";
 
 const target = "x86_64-pc-windows-msvc";
 const destination = resolve("src-tauri/binaries", `aether-${target}.exe`);
-
 if (existsSync(destination) && !process.env.AETHER_CORE_BINARY) {
   console.log(`Using bundled Aether core at ${destination}`);
   process.exit(0);

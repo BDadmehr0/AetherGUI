@@ -1,7 +1,7 @@
 {
     "$schema":  "https://schema.tauri.app/config/2",
     "productName":  "Aethon",
-    "version":  "2.0.0",
+    "version":  "2.1.1",
     "identifier":  "io.github.hamvex.aether-gui",
     "build":  {
                   "frontendDist":  "../dist",
@@ -14,10 +14,10 @@
                                 {
                                     "label":  "main",
                                     "title":  "Aethon",
-                                    "width":  430,
-                                    "height":  860,
+                                    "width":  387,
+                                    "height":  774,
                                     "minWidth":  360,
-                                    "minHeight":  640,
+                                    "minHeight":  600,
                                     "center":  true,
                                     "resizable":  true
                                 }
@@ -39,15 +39,15 @@
                    "longDescription":  "Connect Windows through Aether with built-in TUN routing, DNS protection, recovery, and no companion proxy application.",
                    "externalBin":  [
                                        "binaries/aether",
-                                       "binaries/sing-box"
+                                       "binaries/xray"
                                    ],
-                   "resources": ["../third-party/sing-box-LICENSE.txt"],
+                   "resources": ["../third-party/xray-LICENSE.txt", "../third-party/wintun-LICENSE.txt", "binaries/wintun.dll"],
                    "icon":  [
                                 "icons/32x32.png",
                                 "icons/128x128.png",
                                 "icons/icon.ico"
                             ],
-                   "windows":  {
+                                   "windows":  {
                                    "webviewInstallMode":  {
                                                               "type":  "embedBootstrapper"
                                                           },
