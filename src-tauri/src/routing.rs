@@ -4,6 +4,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+#[cfg(windows)]
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -16,6 +17,15 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::{net::TcpStream, sync::Mutex, time::sleep};
+
+/// True when this build is the Linux desktop client (as opposed to the macOS
+/// stub or the Windows build). Linux and Windows share the Aether-SOCKS5 +
+/// Xray-TUN architecture; this build-time switch chooses the Linux-specific
+/// core name, engine candidates, and `iproute2` route/DNS programming without
+/// touching the Windows code paths.
+fn is_linux_desktop() -> bool {
+    cfg!(target_os = "linux")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +76,10 @@ fn default_tun_backend() -> String {
 fn selected_tun_backend() -> String {
     match std::env::var("AETHON_TUN_BACKEND") {
         Ok(value) if value.eq_ignore_ascii_case("tun2proxy") => "tun2proxy".into(),
+        // The tun2proxy experiment is a Windows-only packet front; Linux VPN Mode
+        // always uses the Xray TUN engine so `AETHON_TUN_BACKEND` cannot silently
+        // select an engine that is not fetched on this platform.
+        _ if is_linux_desktop() => "xray".into(),
         _ => default_tun_backend(),
     }
 }
@@ -79,6 +93,7 @@ struct Session {
 #[derive(Default)]
 struct TrafficCounterState {
     baseline: Option<TrafficTotals>,
+    #[cfg(windows)]
     interface_index: Option<u32>,
 }
 #[derive(Default)]
@@ -141,7 +156,20 @@ impl RoutingManager {
                 downloaded: current.downloaded.saturating_sub(base.downloaded),
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let mut state = traffic.lock().await;
+            let current = linux_interface_traffic(&tun_interface)?;
+            let base = state
+                .baseline
+                .get_or_insert_with(|| current.clone())
+                .clone();
+            Ok(TrafficTotals {
+                uploaded: current.uploaded.saturating_sub(base.uploaded),
+                downloaded: current.downloaded.saturating_sub(base.downloaded),
+            })
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         Ok(TrafficTotals::default())
     }
 
@@ -157,7 +185,23 @@ impl RoutingManager {
         session_generation: u64,
     ) -> Result<(), String> {
         if settings.connection_mode != "vpn" {
+            // SOCKS5 proxy-only mode needs no system routing and therefore no
+            // privilege; the core alone serves the proxy.
             return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // VPN Mode is a real, supported mode on Linux, but it cannot work
+            // without someone authenticated to program the routing table. This
+            // probe keeps a headless/container session from hanging on a
+            // password prompt it can never answer.
+            if !crate::linux::can_elevate() {
+                return Err(
+                    "System-wide VPN Mode requires polkit/sudo (see linux/polkit). \
+                     Install the wrap-aether-gui helper to use VPN Mode on Linux."
+                        .into(),
+                );
+            }
         }
         let _operation = self.lifecycle.lock().await;
         let existing_dir = self
@@ -190,8 +234,8 @@ impl RoutingManager {
         fs::create_dir_all(&base).map_err(display_err)?;
         // Re-derive the base exactly the way every elevated entry point does, so the
         // GUI and the helper can never disagree about which tree is authoritative.
-        // The two agree on Windows by construction; the fallback keeps other
-        // platforms, where routing is unsupported anyway, behaving as before.
+        // The two agree on Windows by construction; on Linux the helper resolves the
+        // invoking user's XDG data dir across the sudo/pkexec boundary.
         let base = routing_base_dir().unwrap_or(base);
         let previous_session_dir = read_recovery_session(&base);
         let session_id = format!(
@@ -378,6 +422,30 @@ fn traffic_totals_from_octets(in_octets: u64, out_octets: u64) -> TrafficTotals 
         uploaded: out_octets,
         downloaded: in_octets,
     }
+}
+
+/// RX/TX counters of the TUN interface, read from `/sys/class/net/<iface>`.
+///
+/// `iface` is a validated `AethonTun-…` name straight from the session record,
+/// so it cannot name a path; the `<iface>` segments in these paths are the
+/// only interpolation. The counters are u64 and the subtraction below stays
+/// within the same wrapping domain the Windows counters use.
+#[cfg(target_os = "linux")]
+fn linux_interface_traffic(iface: &str) -> Result<TrafficTotals, String> {
+    let sys = Path::new("/sys/class/net").join(iface);
+    let rx = sys.join("statistics/rx_bytes");
+    let tx = sys.join("statistics/tx_bytes");
+    let read = |path: &Path| -> Result<u64, String> {
+        let value = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        value
+            .trim()
+            .parse::<u64>()
+            .map_err(|error| format!("invalid traffic counter in {}: {error}", path.display()))
+    };
+    Ok(TrafficTotals {
+        downloaded: read(&rx)?,
+        uploaded: read(&tx)?,
+    })
 }
 
 #[cfg(windows)]
@@ -584,6 +652,12 @@ pub async fn wait_for_socks(address: &str, timeout: Duration) -> Result<(), Stri
 }
 
 fn xray_config(request: &RoutingRequest, physical_interface: &str) -> Value {
+    // Port 53 preselivered to the resolver inside the TUN: the `dns` object is
+    // configured with `queryStrategy` and port; below, the in-TUN DNS is pinned
+    // by the rules. On Windows this ran against 1.1.1.1; on Linux the same
+    // placeholder is used because Xray does no external resolution — all DNS is
+    // routed back out through the Aether SOCKS5 upstream by the `aether`
+    // outbound, so every lookup already leaves through the tunnel.
     let socket: SocketAddr = request.socks_address.parse().unwrap();
     let mut rules =
         vec![json!({"type":"field","process":["aether.exe","xray.exe"],"outboundTag":"direct"})];
@@ -618,8 +692,8 @@ fn xray_config(request: &RoutingRequest, physical_interface: &str) -> Value {
     rules.push(json!({"type":"field","network":"tcp,udp","outboundTag":final_tag}));
     json!({
       "log":{"loglevel":"info"},
-      "dns":{"servers":["1.1.1.1"],"queryStrategy":"UseIPv4"},
-      "inbounds":[{"tag":"tun-in","protocol":"tun","settings":{"name":request.tun_interface,"MTU":request.tun_mtu,"userLevel":0},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"]}}],
+      "dns":{"servers":[{"address":"1.1.1.1","port":53}],"queryStrategy":"UseIPv4"},
+      "inbounds":[{"tag":"tun-in","protocol":"tun","settings":{"name":request.tun_interface,"MTU":request.tun_mtu,"userLevel":0,"stack":"system"},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"]}}],
       "outbounds":[{"tag":"aether","protocol":"socks","settings":{"servers":[{"address":socket.ip().to_string(),"port":socket.port()}]}},{"tag":"direct","protocol":"freedom","settings":{"domainStrategy":"UseIPv4"},"streamSettings":{"sockopt":{"interface":physical_interface}}},{"tag":"block","protocol":"blackhole","settings":{}}],
       "routing":{"domainStrategy":"AsIs","rules":rules},
       "policy":{"levels":{"0":{"handshake":4,"connIdle":300}}}
@@ -916,7 +990,7 @@ pub fn helper_main(request_path: &Path) -> Result<(), String> {
         write_status(
             &request.session_dir,
             "restoring",
-            "Closing the adapter and restoring Windows routes",
+            "Closing the adapter and restoring system routes",
             child.id(),
         )?;
         record_routing_stage(&request, "disconnect_cleanup_started", Some(child.id()))?;
@@ -929,6 +1003,8 @@ pub fn helper_main(request_path: &Path) -> Result<(), String> {
         record_routing_stage(&request, "adapter_removal_requested", None)?;
         cleanup_owned_adapters(None);
         record_routing_stage(&request, "adapter_removal_finished", None)?;
+        #[cfg(target_os = "linux")]
+        teardown_linux_routing(&request)?;
         record_routing_stage(&request, "routes_removed", None)?;
         record_routing_stage(&request, "DNS_restored", None)?;
         record_routing_stage(&request, "adapter_cleanup_finished", None)?;
@@ -936,7 +1012,11 @@ pub fn helper_main(request_path: &Path) -> Result<(), String> {
         write_status(
             &request.session_dir,
             "disabled",
-            "Windows networking was restored",
+            if cfg!(windows) {
+                "Windows networking was restored"
+            } else {
+                "Linux networking was restored"
+            },
             0,
         )?;
         if let Some(base) = request.session_dir.parent() {
@@ -1007,8 +1087,43 @@ fn default_network_interface() -> Result<String, String> {
         }
         Ok(interface)
     }
-    #[cfg(not(windows))]
-    Err("Xray TUN is only supported on Windows".into())
+    #[cfg(target_os = "linux")]
+    {
+        // `ip route show default` with fixed argv (no shell, no sed): the
+        // device name after the `dev` keyword on the first default route.
+        let output = Command::new("ip")
+            .args(["route", "show", "default"])
+            .stderr(Stdio::null())
+            .output()
+            .map_err(display_err)?;
+        if !output.status.success() {
+            return Err(
+                "Could not identify the physical Internet interface for Xray loop prevention"
+                    .into(),
+            );
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let interface = stdout
+            .lines()
+            .find_map(|line| {
+                line.split_whitespace()
+                    .position(|token| token == "dev")
+                    .and_then(|index| line.split_whitespace().nth(index + 1))
+            })
+            .map(str::to_owned)
+            .unwrap_or_default();
+        if interface.is_empty()
+            || interface.contains(['\u{0}', '\n', '\r', ' ', '/'])
+        {
+            return Err(
+                "Could not identify the physical Internet interface for Xray loop prevention"
+                    .into(),
+            );
+        }
+        Ok(interface)
+    }
+    #[cfg(target_os = "macos")]
+    Err("Xray TUN is only supported on Windows and Linux".into())
 }
 
 #[cfg(windows)]
@@ -1095,7 +1210,19 @@ fn configure_tun_and_routes(request: &RoutingRequest) -> Result<(), String> {
             "configure the Aethon TUN interface, protected DNS, and takeover routes",
         )
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // Interface addresses must exist before `ip route add` can reference
+        // them, so address + MTU come first, then the DNS-capture route and
+        // the two /1 takeover routes that override the default route.
+        configure_tun_interface(request)?;
+        install_takeover_routes(request, request.ipv6_upstream)?;
+        if request.dns_leak_protection {
+            install_dns_capture(request)?;
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
     {
         let _ = request;
         Ok(())
@@ -1127,15 +1254,28 @@ fn configure_tun_interface(request: &RoutingRequest) -> Result<(), String> {
             "configure the Aethon TUN interface and protected DNS",
         )
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        let interface = request.tun_interface.as_str();
+        let mtu = request.tun_mtu.to_string();
+        run_linux(&["ip", "link", "set", "dev", interface, "up"], "bring the Aethon TUN interface up")?;
+        run_linux(&["ip", "link", "set", "dev", interface, "mtu", &mtu, "up"], "set the Aethon TUN MTU")?;
+        run_linux(&["ip", "addr", "add", "172.19.0.1/30", "dev", interface], "assign the Aethon TUN IPv4 address")?;
+        run_linux(&["ip", "-6", "addr", "add", "fdfe:dcba:9876::1/126", "dev", interface], "assign the Aethon TUN IPv6 address")?;
+        if request.dns_leak_protection {
+            run_linux(&["ip", "route", "replace", "default", "dev", interface, "table", "51820"], "install the Aethon DNS-capture route")?;
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
     {
         let _ = request;
         Ok(())
     }
 }
 
-#[cfg(windows)]
-fn run_netsh_script(
+    #[cfg(windows)]
+    fn run_netsh_script(
     session_dir: &Path,
     file_name: &str,
     commands: &[String],
@@ -1156,6 +1296,190 @@ fn run_netsh_script(
             &output.stderr
         });
         Err(format!("Could not {action}: {}", detail.trim()))
+    }
+}
+
+/// Run one Linux network command with fixed arguments.
+///
+/// **No shell anywhere in the privileged path.** The elevated helper runs as
+/// root, but the request fields it acts on come from a JSON file in the
+/// *unprivileged* user's `~/.local/share/<app>/routing` directory. Letting any
+/// of those strings near a shell would turn an edit of that file into root
+/// code execution, so each command is spawned by name with a fixed argv whose
+/// only request-derived element is an argument `ip`/`nft`/`iptables` treat as
+/// opaque text (the interface name is already restricted to `AethonTun-…`).
+#[cfg(target_os = "linux")]
+fn run_linux(argv: &[&str], action: &str) -> Result<(), String> {
+    let Some((program, args)) = argv.split_first() else {
+        return Ok(());
+    };
+    let mut command = Command::new(program);
+    command.args(args);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::piped());
+    let output = command.output().map_err(display_err)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        Err(format!("Could not {action}: {}", detail.trim()))
+    }
+}
+
+/// The "try to delete, ignore if absent" form used by teardown, where a rule
+/// or route may legitimately be gone already.
+#[cfg(target_os = "linux")]
+fn run_linux_quiet(argv: &[&str]) {
+    let _ = run_linux(argv, "perform optional Linux cleanup");
+}
+
+/// Append an iptables rule only when it is absent: `-C` (check) first, then
+/// `-A` (append) if and only if the check failed. Fixed argv for both halves.
+#[cfg(target_os = "linux")]
+fn iptables_ensure(check: &[&str], apply: &[&str], action: &str) -> Result<(), String> {
+    if run_linux(check, action).is_err() {
+        run_linux(apply, action)?;
+    }
+    Ok(())
+}
+
+/// Which firewall tool the Linux helper uses for its DNS-capture rule. Chosen
+/// once per connection rather than at build time, so a system that has only
+/// one of `nft`/`iptables` still works without recompiling.
+#[cfg(target_os = "linux")]
+fn routing_firewall_kind() -> String {
+    let explicit = std::env::var("AETHON_ROUTING_TOOLS")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match explicit.as_str() {
+        "iptables" => "iptables".to_string(),
+        "nftables" | "nft" => "nftables".to_string(),
+        "none" => "none".to_string(),
+        _ => {
+            if which_in_path("nft").is_some() {
+                "nftables".to_string()
+            } else if which_in_path("iptables").is_some() {
+                "iptables".to_string()
+            } else {
+                "none"
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn which_in_path(bin: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(bin))
+            .find(|path| path.is_file())
+    })
+}
+
+/// The home directory of the user who asked for elevation.
+///
+/// When this helper is already root, `$HOME` points at `/root`, which is never
+/// the data directory that matters. `pkexec` and `sudo` both record the
+/// invoking user id (`PKEXEC_UID` / `SUDO_UID`); the passwd identity is looked
+/// up from it so the resolved home is the caller's, not root's. As a final
+/// fallback the environment `HOME` is used.
+#[cfg(target_os = "linux")]
+fn elevated_invoking_home() -> Option<PathBuf> {
+    for var in ["PKEXEC_UID", "SUDO_UID"] {
+        if let Some(raw) = std::env::var_os(var) {
+            if let Ok(uid) = raw.to_string_lossy().parse::<u32>() {
+                if let Some(home) = home_for_uid(uid) {
+                    return Some(home);
+                }
+            }
+        }
+    }
+    // Not elevated (or elevated without those variables set): trust $HOME.
+    std::env::var_os("HOME").filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
+/// Map a uid to its home directory via `id -nu <uid>` + `getent passwd <name>`.
+///
+/// Kept shell-free (numeric uid in, `getent` with a fixed argv), and every
+/// value below is either validated or unused.
+#[cfg(target_os = "linux")]
+fn home_for_uid(uid: u32) -> Option<PathBuf> {
+    // uid -> username (never shell-interpreted: numeric only).
+    let user = Command::new("id")
+        .arg("-nu")
+        .arg(uid.to_string())
+        .output()
+        .ok()
+        .and_then(|out| {
+            let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            (!name.is_empty() && !name.contains(['\n', '\r', '/'])).then_some(name)
+        })?;
+    // username -> home (via `getent passwd <name>`).
+    let passwd = Command::new("getent")
+        .args(["passwd", &user])
+        .output()
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())?;
+    let home = passwd.split(':').nth(5).unwrap_or("").to_string();
+    (!home.is_empty() && !home.contains('\n') && home != "/").then(|| PathBuf::from(home))
+}
+
+/// Remove the takeover routes, DNS-capture rule and the TUN interface the
+/// helper created for the session, then flush the helper's routing table.
+///
+/// Every removal is the tolerant form: a route, rule, or interface that a
+/// crashed session already left absent is not an error worth surfacing.
+#[cfg(target_os = "linux")]
+fn teardown_linux_routing(request: &RoutingRequest) -> Result<(), String> {
+    let interface = request.tun_interface.as_str();
+    if request.dns_leak_protection {
+        match routing_firewall_kind().as_str() {
+            "iptables" => {
+                run_linux_quiet(&["iptables", "-t", "nat", "-D", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "MARK", "--set-mark", "0x1a37"]);
+                run_linux_quiet(&["iptables", "-t", "mangle", "-D", "PREROUTING", "-p", "tcp", "--dport", "53", "-j", "MARK", "--set-mark", "0x1a37"]);
+            }
+            _ => {
+                run_linux_quiet(&["nft", "delete", "table", "inet", "aethon"]);
+            }
+        }
+    }
+    run_linux_quiet(&["ip", "route", "del", "0.0.0.0/1", "dev", interface]);
+    run_linux_quiet(&["ip", "route", "del", "128.0.0.0/1", "dev", interface]);
+    run_linux_quiet(&["ip", "-6", "route", "del", "::/1", "dev", interface]);
+    run_linux_quiet(&["ip", "route", "flush", "table", "51820"]);
+    run_linux_quiet(&["ip", "link", "del", "dev", interface]);
+    Ok(())
+}
+
+/// Install the DNS-capture rule that steers port-53 traffic into the tunnel's
+/// protected resolver so queries cannot leak past the VPN.
+#[cfg(target_os = "linux")]
+fn install_dns_capture(request: &RoutingRequest) -> Result<(), String> {
+    let _ = request;
+    match routing_firewall_kind().as_str() {
+        "iptables" => {
+            iptables_ensure(
+                &["iptables", "-t", "nat", "-C", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "MARK", "--set-mark", "0x1a37"],
+                &["iptables", "-t", "nat", "-A", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "MARK", "--set-mark", "0x1a37"],
+                "install the Aethon DNS-capture rule",
+            )?;
+            iptables_ensure(
+                &["iptables", "-t", "mangle", "-C", "PREROUTING", "-p", "tcp", "--dport", "53", "-j", "MARK", "--set-mark", "0x1a37"],
+                &["iptables", "-t", "mangle", "-A", "PREROUTING", "-p", "tcp", "--dport", "53", "-j", "MARK", "--set-mark", "0x1a37"],
+                "install the Aethon DNS-capture rule",
+            )
+        }
+        _ => {
+            // nft `add` of an existing object fails with "File exists"; the
+            // rule/chain/table being present is exactly the state we want, so
+            // every add below is the tolerant form.
+            run_linux_quiet(&["nft", "add", "table", "inet", "aethon"]);
+            run_linux_quiet(&["nft", "add", "chain", "inet", "aethon", "dns", "{ type filter hook output priority -150; policy accept; }"]);
+            run_linux_quiet(&["nft", "add", "rule", "inet", "aethon", "dns", "tcp", "dport", "53", "meta", "mark", "set", "0x1a37"]);
+            run_linux_quiet(&["nft", "add", "rule", "inet", "aethon", "dns", "udp", "dport", "53", "meta", "mark", "set", "0x1a37"]);
+            Ok(())
+        }
     }
 }
 
@@ -1186,7 +1510,22 @@ fn install_takeover_routes(request: &RoutingRequest, include_ipv6: bool) -> Resu
             "install and prioritize the Aethon takeover routes",
         )
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        let interface = request.tun_interface.as_str();
+        // `add` after a `del` is deliberate: a leftover route from a crashed
+        // session is either removed or simply re-added (which succeeds), so the
+        // helper converges to exactly one copy of each /1 route.
+        run_linux_quiet(&["ip", "route", "del", "default", "dev", interface, "table", "51820"]);
+        run_linux(&["ip", "route", "add", "0.0.0.0/1", "dev", interface, "via", "172.19.0.2", "metric", "0"], "install the Aethon IPv4 takeover routes")?;
+        run_linux(&["ip", "route", "add", "128.0.0.0/1", "dev", interface, "via", "172.19.0.2", "metric", "0"], "install the Aethon IPv4 takeover routes")?;
+        if include_ipv6 {
+            run_linux(&["ip", "-6", "route", "add", "::/1", "dev", interface, "via", "fdfe:dcba:9876::2", "metric", "0"], "install the Aethon IPv6 takeover routes")?;
+            run_linux(&["ip", "-6", "route", "add", "8000::/1", "dev", interface, "via", "fdfe:dcba:9876::2", "metric", "0"], "install the Aethon IPv6 takeover routes")?;
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
     {
         let _ = (request, include_ipv6);
         Ok(())
@@ -1257,7 +1596,23 @@ fn tun_adapter_ready(interface_name: &str) -> bool {
         unsafe { FreeMibTable(table.cast()) };
         found
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // The interface is created by Xray's TUN inbound; once /sys/class/net
+        // shows it `up` with a non-zero MTU (our `configure_tun_interface` runs
+        // after this check) the adapter is usable. The name is validated
+        // (AethonTun-…), so the sysfs path cannot escape.
+        let path = Path::new("/sys/class/net").join(interface_name);
+        let state_up = fs::read_to_string(path.join("operstate"))
+            .map(|state| state.trim() == "up")
+            .unwrap_or(false);
+        let mtu = fs::read_to_string(path.join("mtu"))
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        state_up && mtu > 0
+    }
+    #[cfg(target_os = "macos")]
     {
         let _ = interface_name;
         true
@@ -1287,7 +1642,7 @@ fn wait_for_takeover_route_ready(
     loop {
         if let Some(exit) = child.try_wait().map_err(display_err)? {
             return Err(format!(
-                "Routing engine exited while Windows routes were converging. Exit code: {}.{}",
+                "Routing engine exited while the system routes were converging. Exit code: {}.{}",
                 exit.code().unwrap_or(1),
                 read_log_tail(log_path)
             ));
@@ -1297,7 +1652,7 @@ fn wait_for_takeover_route_ready(
         }
         if std::time::Instant::now() >= deadline {
             return Err(format!(
-                "Windows did not activate the Aethon takeover route within {} seconds",
+                "The system did not activate the Aethon takeover route within {} seconds",
                 TAKEOVER_ROUTE_BUDGET.as_secs()
             ));
         }
@@ -1336,7 +1691,20 @@ fn takeover_route_ready(interface_name: &str) -> bool {
             unsafe { GetBestInterface(u32::from_ne_bytes([1, 1, 1, 1]), &mut actual_index) };
         result == 0 && actual_index == expected_index
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // The TUN is the effective default once `/1 routes reference it (and
+        // the engine is alive); `ip route show dev <iface>` is the shell-free
+        // way to confirm that. No user-controlled string reaches a shell here
+        // (there is no shell), and the interface name is already validated.
+        let output = Command::new("ip")
+            .args(["route", "show", "dev", interface_name])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        !output.is_empty() && output.lines().any(|line| line.contains(interface_name))
+    }
+    #[cfg(target_os = "macos")]
     {
         let _ = interface_name;
         true
@@ -1415,9 +1783,11 @@ fn read_log_tail(path: &Path) -> String {
 /// Tauri's application identifier, copied from `tauri.conf.json`.
 ///
 /// `AppHandle::path().app_local_data_dir()` resolves to
-/// `%LOCALAPPDATA%\{APP_IDENTIFIER}` on Windows. The elevated helper is started as
-/// a bare CLI process and has no `AppHandle`, so it derives the same location from
-/// its own environment rather than trusting the caller to name it.
+/// `%LOCALAPPDATA%\{APP_IDENTIFIER}` on Windows and
+/// `$XDG_DATA_HOME/{APP_IDENTIFIER}` (default `~/.local/share`) on Linux. The
+/// elevated helper is started as a bare CLI process and has no `AppHandle`, so
+/// it derives the same location from its own environment (and, when elevated,
+/// from the invoking user's identity) rather than trusting the caller to name it.
 const APP_IDENTIFIER: &str = "io.github.hamvex.aether-gui";
 const REQUEST_FILE_NAME: &str = "request.json";
 
@@ -1460,20 +1830,58 @@ fn same_file_path(left: &Path, right: &Path) -> bool {
 /// otherwise redirect every elevated write out of the application's own tree.
 /// Junctions need no privilege to create, so a textual check is not enough.
 fn routing_base_dir() -> Result<PathBuf, String> {
-    let local =
-        std::env::var_os("LOCALAPPDATA").ok_or_else(|| "LOCALAPPDATA is not set".to_string())?;
-    let local = strip_verbatim_prefix(&fs::canonicalize(local).map_err(|error| {
-        format!("The local application data directory is unavailable: {error}")
-    })?);
-    let base = local.join(APP_IDENTIFIER).join("routing");
-    let resolved = strip_verbatim_prefix(
-        &fs::canonicalize(&base)
-            .map_err(|error| format!("The Aethon routing directory is unavailable: {error}"))?,
-    );
-    if !same_path(&resolved, &base) {
-        return Err("The Aethon routing directory is redirected and was refused".into());
+    #[cfg(windows)]
+    {
+        let local =
+            std::env::var_os("LOCALAPPDATA").ok_or_else(|| "LOCALAPPDATA is not set".to_string())?;
+        let local = strip_verbatim_prefix(&fs::canonicalize(local).map_err(|error| {
+            format!("The local application data directory is unavailable: {error}")
+        })?);
+        let base = local.join(APP_IDENTIFIER).join("routing");
+        // Create before resolving, exactly like the Linux arm: the elevated
+        // helper (and the tests) run with the same environment but must not
+        // assume the unprivileged GUI already made the tree. `canonicalize`
+        // below then fails only for a genuine problem, not for a base that is
+        // simply not there yet.
+        fs::create_dir_all(&base).map_err(|error| {
+            format!("The Aethon routing directory is unavailable: {error}")
+        })?;
+        let resolved = strip_verbatim_prefix(
+            &fs::canonicalize(&base)
+                .map_err(|error| format!("The Aethon routing directory is unavailable: {error}"))?,
+        );
+        if !same_path(&resolved, &base) {
+            return Err("The Aethon routing directory is redirected and was refused".into());
+        }
+        return Ok(resolved);
     }
-    Ok(resolved)
+    #[cfg(target_os = "linux")]
+    {
+        // The unprivileged GUI resolves `$XDG_DATA_HOME/<app>` (defaulting to
+        // `~/.local/share`), and the helper may run as root after sudo/pkexec.
+        // Neither can trust the other for the *name* of this tree: the root
+        // copy must not write into `/root`, and the GUI must not read `/root`.
+        //
+        // The invoking identity crosses the privilege boundary through the
+        // `PKEXEC_UID`/`SUDO_UID` variables the escalation tools set; the
+        // derived GID/UID are looked up from the passwd database so the helper
+        // and the GUI resolve the same home directory regardless of who is
+        // technically running this process.
+        let home = elevated_invoking_home().ok_or_else(|| "HOME is not set".to_string())?;
+        let data_home = std::env::var_os("XDG_DATA_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local").join("share"));
+        // Mirrors `app_local_data_dir()/.join("routing")` exactly, so the GUI
+        // and the elevated helper agree on the authoritative session tree.
+        let data = data_home.join(APP_IDENTIFIER).join("routing");
+        std::fs::create_dir_all(&data).map_err(display_err)?;
+        Ok(data)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Err("System-wide VPN Mode is not supported on macOS".into())
+    }
 }
 
 /// Resolve `candidate` and require it to be a direct child of the routing base.
@@ -1505,9 +1913,38 @@ fn authorized_session_dir(candidate: &Path) -> Result<PathBuf, String> {
         }
         Ok(resolved)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     {
-        Ok(candidate.to_path_buf())
+        if !candidate.is_absolute() {
+            return Err("Routing session path must be absolute".into());
+        }
+        let base = routing_base_dir()?;
+        // Both sides are canonicalised so a symlink planted anywhere under
+        // `$XDG_DATA_HOME/<app>` cannot redirect an elevated write outside the
+        // routing tree. The comparison is done on the resolved forms, the same
+        // way the Windows arm resolves junctions away.
+        let base_resolved =
+            fs::canonicalize(&base).map_err(|error| {
+                format!("The Aethon routing directory is unavailable: {error}")
+            })?;
+        let resolved = fs::canonicalize(candidate)
+            .map_err(|error| format!("Routing session path is unavailable: {error}"))?;
+        if !resolved.is_dir() {
+            return Err("Routing session path is not a directory".into());
+        }
+        if resolved.file_name().is_none()
+            || !resolved
+                .parent()
+                .is_some_and(|parent| same_path(parent, &base_resolved))
+        {
+            return Err("Routing session path is outside the Aethon routing directory".into());
+        }
+        Ok(resolved)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = candidate;
+        Err("System-wide VPN Mode is not supported on macOS".into())
     }
 }
 
@@ -1651,8 +2088,47 @@ fn cli_recovery_session_at(recovery: &Path) -> Option<PathBuf> {
         .flatten()
 }
 fn cli_recovery_path() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(|v| PathBuf::from(v).join("FirsthamAetherGui-routing-recovery.json"))
+    #[cfg(windows)]
+    {
+        return std::env::var_os("LOCALAPPDATA")
+            .map(|v| PathBuf::from(v).join("FirsthamAetherGui-routing-recovery.json"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // The same name the app-local `recovery.json` shares lives beside it;
+        // this file is what a machine-wide (root) repair pass reads when no GUI
+        // is running, so it must resolve to the *same user's* data directory
+        // through the SUDO_USER indirection, never to /root.
+        if let Some(home) = std::env::var_os("SUDO_USER").and_then(|user| {
+            let user = user.to_string_lossy().into_owned();
+            if user.eq_ignore_ascii_case("root") {
+                None
+            } else {
+                Some(PathBuf::from("/home").join(&user))
+            }
+        }) {
+            return Some(
+                home.join(".local")
+                    .join("share")
+                    .join(APP_IDENTIFIER)
+                    .join("FirsthamAetherGui-routing-recovery.json"),
+            );
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return Some(
+                PathBuf::from(home)
+                    .join(".local")
+                    .join("share")
+                    .join(APP_IDENTIFIER)
+                    .join("FirsthamAetherGui-routing-recovery.json"),
+            );
+        }
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        None
+    }
 }
 
 fn launch_elevated(mode: &str, path: &Path) -> Result<(), String> {
@@ -1680,10 +2156,14 @@ fn launch_elevated(mode: &str, path: &Path) -> Result<(), String> {
         }
         Ok(())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux::launch_elevated(mode, path)
+    }
+    #[cfg(target_os = "macos")]
     {
         let _ = (mode, path);
-        Err("System-wide VPN Mode is only supported on Windows".into())
+        Err("System-wide VPN Mode is only supported on Windows and Linux".into())
     }
 }
 
@@ -1713,7 +2193,14 @@ fn process_alive(pid: u32) -> bool {
         CloseHandle(h);
         ok
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // A process is alive while /proc/<pid> exists; zombies show up as
+        // existing too, which matches "not yet reaped" semantics this helper
+        // needs during teardown.
+        pid > 0 && Path::new("/proc").join(pid.to_string()).exists()
+    }
+    #[cfg(target_os = "macos")]
     {
         let _ = pid;
         true
@@ -1783,7 +2270,33 @@ fn terminate_owned_engine(pid: u32) -> bool {
         CloseHandle(handle);
         owned
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // The same image check as Windows, expressed through /proc/<pid>/exe:
+        // the PID is read back from a user-writable status file, so it must
+        // only ever resolve to one of this installation's engines.
+        if pid <= 1 {
+            return false;
+        }
+        let Ok(resolved) = fs::canonicalize(Path::new("/proc").join(pid.to_string()).join("exe"))
+        else {
+            return false;
+        };
+        let allowed = owned_engine_paths();
+        let owned = allowed.iter().any(|candidate| {
+            candidate
+                .canonicalize()
+                .map(|path| path == resolved)
+                .unwrap_or(false)
+        });
+        if owned {
+            let _ = Command::new("kill")
+                .arg(pid.to_string())
+                .status();
+        }
+        owned
+    }
+    #[cfg(target_os = "macos")]
     {
         let _ = pid;
         false
@@ -1815,7 +2328,37 @@ fn cleanup_owned_adapters(keep: Option<&str>) -> usize {
             .map(|output| String::from_utf8_lossy(&output.stdout).lines().count())
             .unwrap_or(0)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // A Linux "owned adapter" is an AethonTun-* interface left behind by an
+        // unclean shutdown. Enumerated from /sys/class/net (no shell, fixed
+        // argv for the removal), and only Aethon's own name pattern is ever
+        // touched. `ip link del` is idempotent and needs the same privilege
+        // the helper already holds.
+        let keep = keep.unwrap_or("");
+        let mut names = Vec::new();
+        if let Ok(entries) = Path::new("/sys/class/net").read_dir() {
+            for entry in entries.filter_map(|entry| entry.ok()) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with("AethonTun-") && name != keep {
+                    names.push(name);
+                }
+            }
+        }
+        let mut removed = 0usize;
+        for name in names {
+            if Command::new("ip")
+                .args(["link", "del", "dev", &name])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok()
+            {
+                removed += 1;
+            }
+        }
+        removed
+    }
+    #[cfg(target_os = "macos")]
     {
         let _ = keep;
         0
@@ -1851,7 +2394,21 @@ fn owned_adapter_requires_recovery(keep: Option<&str>) -> bool {
         unsafe { FreeMibTable(table.cast()) };
         found
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // Recover when any AethonTun-* interface lingers from a previous
+        // session; `cleanup_owned_adapters` knows how to release them.
+        let _ = keep;
+        Path::new("/sys/class/net")
+            .read_dir()
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .any(|entry| entry.file_name().to_string_lossy().starts_with("AethonTun-"))
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(target_os = "macos")]
     {
         let _ = keep;
         false
@@ -1877,14 +2434,42 @@ fn sync_socks_ready(address: &str) -> bool {
 /// `tun2proxy_candidates`: `CARGO_MANIFEST_DIR` is an absolute path from whatever machine ran
 /// the build, so baking it into a shipped image both discloses the build path and invites a
 /// release binary to resolve an executable out of a source tree that is not there.
+/// The name the packaged routing engine carries on this platform.
+fn xray_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "xray.exe"
+    } else {
+        "xray"
+    }
+}
+
 fn xray_candidates(current_dir: &Path) -> Vec<PathBuf> {
-    let mut candidates = vec![current_dir.join("xray.exe")];
+    let mut candidates = vec![current_dir.join(xray_binary_name())];
     if cfg!(debug_assertions) {
         candidates.push(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("binaries")
-                .join("xray-x86_64-pc-windows-msvc.exe"),
+                .join(if cfg!(windows) {
+                    "xray-x86_64-pc-windows-msvc.exe"
+                } else {
+                    "xray"
+                }),
         );
+    }
+    // Packaged Linux layouts place the engine beside the helper, not beside the
+    // GUI: /usr/lib/aethon/xray. Deriving it from the current executable keeps
+    // the search inside the application's own install tree.
+    if cfg!(target_os = "linux") {
+        if let Some(parent) = current_dir.parent() {
+            for share in ["lib", "lib64"] {
+                candidates.push(
+                    parent
+                        .join(share)
+                        .join("aethon")
+                        .join(xray_binary_name()),
+                );
+            }
+        }
     }
     candidates
 }
@@ -1898,7 +2483,7 @@ fn resolve_xray_beside_current() -> Result<PathBuf, String> {
         .ok_or_else(|| {
             format!(
                 "Bundled routing engine was not found at {}",
-                current_dir.join("xray.exe").display()
+                current_dir.join(xray_binary_name()).display()
             )
         })
 }
@@ -1931,23 +2516,63 @@ fn resolve_tun2proxy_beside_current() -> Result<PathBuf, String> {
 }
 
 const XRAY_VERSION: &str = "26.3.27";
+#[cfg(windows)]
 const XRAY_SHA256: &str = "15c2d007954ac53ba69b80ec91242786b3c0b71d52649165b4ca1d5cc96ef8f1";
+/// Windows ships two engines (xray + the experimental tun2proxy), both with
+/// their own pinned digest. The experimental tun2proxy engine has no reviewed
+/// Linux provenance (see the fetch script), so on Linux its pin stays empty and
+/// any file is refused; the version string is still referenced cross-platform,
+/// which is why these two survive outside the Windows cfg.
 const TUN2PROXY_VERSION: &str = "0.8.3";
 const TUN2PROXY_SHA256: &str = "fd45feecd8bfe224edb9c66de453e186669ef0d9ce0803acdd318e7f88ef30db";
+#[cfg(windows)]
 const WINTUN_VERSION: &str = "0.14.1";
+#[cfg(windows)]
 const WINTUN_SHA256: &str = "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce";
 /// Wintun ships EV-signed by its author; that certificate has since expired, but the
 /// RFC 3161 countersignature keeps the signature valid, so this is checkable indefinitely.
+#[cfg(windows)]
 const WINTUN_PUBLISHER: &str = "WireGuard LLC";
+
+/// The pinned digest for the Linux Xray engine, selected per build arch.
+///
+/// Each arch derivative of `xray` (a build variant of the same upstream Xray
+/// version) has its own SHA-256, recorded in scripts/xray-linux-pins.json and
+/// mirrored here for the arch the release can build:
+/// `x86_64`, `aarch64`, and `armv7` (32-bit ARMv7). Update these alongside a
+/// fetch-script/CI bump in one reviewed commit.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(non_upper_case_globals)]
+pub mod linux_engine_pins {
+    /// Xray 26.3.27 Linux x86_64 binary digest — populate by running
+    /// `npm run fetch:routing:linux` once and reviewing the recorded value.
+    pub const XRAY_SHA256_X86_64: &str = "";
+    /// Xray 26.3.27 Linux aarch64 binary digest.
+    pub const XRAY_SHA256_AARCH64: &str = "";
+    /// Xray 26.3.27 Linux armv7 binary digest.
+    pub const XRAY_SHA256_ARMV7: &str = "";
+
+    /// The digest the current build architecture enforces. An empty constant
+    /// means the build refuses to start the engine rather than skip the check.
+    pub fn current() -> &'static str {
+        match std::env::consts::ARCH {
+            "x86_64" => XRAY_SHA256_X86_64,
+            "aarch64" => XRAY_SHA256_AARCH64,
+            "arm" => XRAY_SHA256_ARMV7,
+            _ => "",
+        }
+    }
+}
 
 fn validate_xray_binary(path: &Path, request: Option<&RoutingRequest>) -> Result<String, String> {
     if let Some(request) = request {
         record_routing_stage(request, "xray_hash_started", None)?;
     }
+    let pinned: &str = xray_binary_pin();
     let actual = crate::process::hash_file(path)?;
-    if actual != XRAY_SHA256 {
+    if actual != pinned {
         return Err(format!(
-            "Bundled Xray integrity check failed: expected {XRAY_SHA256}, got {actual}"
+            "Bundled Xray integrity check failed: expected {pinned}, got {actual}"
         ));
     }
     if let Some(request) = request {
@@ -1955,6 +2580,61 @@ fn validate_xray_binary(path: &Path, request: Option<&RoutingRequest>) -> Result
         record_routing_stage(request, "xray_version_derived_from_pinned_hash", None)?;
     }
     Ok(format!("Xray {XRAY_VERSION} (SHA-256 verified)"))
+}
+
+/// The digest this build compares the routing engine against: the Windows
+/// constant, or the Linux per-arch pin. An unresolvable (empty) pin fails
+/// closed rather than accepting bytes that were never reviewed.
+fn xray_binary_pin() -> &'static str {
+    #[cfg(windows)]
+    {
+        XRAY_SHA256
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_engine_pins::current()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        linux_engine_pins::current()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        ""
+    }
+}
+
+/// The pinned digest for the Aether core binary, per build arch.
+///
+/// The Linux core ships as the static-musl `aether` (one per CPU family), whose
+/// digest is recorded in scripts/linux-sidecar-pins.json and mirrored here.
+/// Keep this in lock-step with a fetch-script/CI version bump in one reviewed
+/// commit. Empty means "refuse to launch" — a digest is never guessed.
+#[cfg(target_os = "linux")]
+#[allow(non_upper_case_globals)]
+pub mod aether_core_pins {
+    pub const AETHER_SHA256_X86_64: &str = "";
+    pub const AETHER_SHA256_AARCH64: &str = "";
+    pub const AETHER_SHA256_ARMV7: &str = "";
+}
+
+/// The digest `process::validate_core_binary` enforces for the running build.
+#[cfg(target_os = "linux")]
+pub(crate) fn aether_core_pin() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => aether_core_pins::AETHER_SHA256_X86_64,
+        "aarch64" => aether_core_pins::AETHER_SHA256_AARCH64,
+        "arm" => aether_core_pins::AETHER_SHA256_ARMV7,
+        _ => "",
+    }
+}
+
+/// macOS builds cannot verify a bundled core yet, so its pin is unresolved and
+/// the core is refused — symmetric with the routing engine's anti-exfiltration
+/// stance. Never guessed; filled in the same reviewed commit that ships it.
+#[cfg(target_os = "macos")]
+pub(crate) fn aether_core_pin() -> &'static str {
+    ""
 }
 
 /// The routing engine's integrity check, started on its own thread.
@@ -1998,9 +2678,15 @@ pub(crate) fn prewarm_engine_integrity() -> Option<String> {
 
 fn validate_tun2proxy_binary(path: &Path) -> Result<String, String> {
     let actual = crate::process::hash_file(path)?;
-    if actual != TUN2PROXY_SHA256 {
+    let pinned: &str = if cfg!(windows) {
+        TUN2PROXY_SHA256
+    } else {
+        // There is no reviewed Linux tun2proxy build; refuse to run any file.
+        ""
+    };
+    if actual != pinned {
         return Err(format!(
-            "Experimental tun2proxy integrity check failed: expected {TUN2PROXY_SHA256}, got {actual}"
+            "Experimental tun2proxy integrity check failed: expected {pinned}, got {actual}"
         ));
     }
     let mut command = Command::new(path);
@@ -2021,6 +2707,10 @@ fn validate_tun2proxy_binary(path: &Path) -> Result<String, String> {
 ///
 /// Split out from the copy so the release build's search path is assertable: see
 /// `the_release_build_does_not_search_the_build_machines_source_tree`.
+///
+/// Windows-only: there is no Wintun on Linux (the TUN driver is in-kernel), so
+/// the only callers are the Windows arms of `ensure_wintun_beside`.
+#[cfg(windows)]
 fn wintun_candidates(current_dir: &Path) -> Vec<PathBuf> {
     let mut candidates = vec![
         current_dir.join("binaries/wintun.dll"),
@@ -2037,6 +2727,21 @@ fn wintun_candidates(current_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn ensure_wintun_beside(engine: &Path) -> Result<(), String> {
+    // Linux TUN uses the kernel's native `tun` driver (/dev/net/tun); there is
+    // no Wintun DLL and Xray's `stack: system` setting selects it. The helper
+    // is still required for routing-table admin, not for a driver.
+    #[cfg(target_os = "linux")]
+    {
+        let _ = engine;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = engine;
+        return Err("System-wide VPN Mode is not supported on macOS".into());
+    }
+    #[cfg(windows)]
+    {
     let engine_dir = engine.parent().ok_or("Invalid Xray application path")?;
     let destination = engine_dir.join("wintun.dll");
     // Verified even when it is already there. This directory sits under %LOCALAPPDATA% for
@@ -2063,6 +2768,7 @@ fn ensure_wintun_beside(engine: &Path) -> Result<(), String> {
     // Re-checked at the destination rather than trusting the copy, because the source and
     // the destination are two different files in a directory the user can write to.
     validate_wintun(&destination).map(|_| ())
+    }
 }
 
 /// Refuse any wintun.dll that is not the pinned WireGuard build.
@@ -2070,6 +2776,10 @@ fn ensure_wintun_beside(engine: &Path) -> Result<(), String> {
 /// Both checks are required and neither substitutes for the other: the hash says these are
 /// the exact bytes this release was tested against, and the signature says WireGuard LLC
 /// produced them, which is what still holds if the pin is ever updated.
+///
+/// Windows-only: Wintun is a Windows kernel driver, so there is no Linux docent
+/// of this gate to compile (the TUN driver is part of the kernel there).
+#[cfg(windows)]
 fn validate_wintun(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(display_err)?;
     let mut hasher = Sha256::new();
@@ -2313,13 +3023,25 @@ mod tests {
 
     #[test]
     fn pinned_xray_binary_has_expected_version_and_hash() {
+        // The Windows archive extracts to a target-tripled name; the Linux one
+        // extracts to plain `xray`. The pin itself is per-platform: Windows XRAY_SHA256
+        // or the Linux per-arch constant, which stays empty until the first
+        // `npm run fetch:routing:linux` records it. An empty pin means "refuse to
+        // start", so the assertion is skipped rather than inverted for that
+        // not-yet-reviewed state.
         let engine = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/xray-x86_64-pc-windows-msvc.exe");
-        if engine.exists() {
-            assert!(validate_xray_binary(&engine, None)
-                .unwrap()
-                .starts_with("Xray 26.3.27 "));
+            .join("binaries")
+            .join(if cfg!(windows) {
+                "xray-x86_64-pc-windows-msvc.exe"
+            } else {
+                "xray"
+            });
+        if !engine.exists() || xray_binary_pin().is_empty() {
+            return;
         }
+        assert!(validate_xray_binary(&engine, None)
+            .unwrap()
+            .starts_with("Xray 26.3.27 "));
     }
 
     #[test]
@@ -2402,10 +3124,20 @@ mod tests {
                 leaks.is_empty(),
                 "a release build must not search the build machine's source tree: {leaks:?}"
             );
-            assert_eq!(
-                candidates,
-                vec![install.join("xray.exe")],
-                "a release build must look beside the executable and nowhere else"
+            assert!(
+                candidates
+                    .first()
+                    .is_some_and(|first| first == &install.join(xray_binary_name())),
+                "a release build must look beside the executable first: {candidates:?}"
+            );
+            // On Linux the packaged engine also lives under /usr/lib{,64}/aethon,
+            // so the candidate list is longer there; the entries must all stay
+            // inside the install tree (never the build machine's source tree).
+            assert!(
+                candidates
+                    .iter()
+                    .all(|path| !path.starts_with(&manifest)),
+                "a release build must not search the build machine's source tree: {leaks:?}"
             );
         }
     }

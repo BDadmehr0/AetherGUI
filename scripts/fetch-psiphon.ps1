@@ -1,4 +1,21 @@
 $ErrorActionPreference = "Stop"
+
+# SHA-256 of a file, lowercase hex, via .NET — not `Get-FileHash`, which is not
+# resolved in the Windows PowerShell 5.1 session the runner uses for
+# `powershell -File` scripts. See scripts/fetch-aether.ps1.
+function Get-Sha256Hex {
+    param([string]$LiteralPath)
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $stream.Dispose()
+        $sha256.Dispose()
+    }
+}
+
 $commit = "38148cd835e07d688dbb6b30ae24ad2fd0e5d847"
 $sourceUrl = "https://github.com/Psiphon-Labs/psiphon-tunnel-core.git"
 $expected = "fc52730ba75425c20125b621ed9889b221d26e82631603501e49f1ce85bd039b"
@@ -31,7 +48,7 @@ try {
   $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
   $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
   if ($machine -ne 0x8664) { throw ("Psiphon build is not AMD64 PE (machine 0x{0:X4})." -f $machine) }
-  $actual = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()
+  $actual = Get-Sha256Hex -LiteralPath $output
   if ($actual -ne $expected) { throw "Psiphon reproducible-build checksum mismatch. Expected $expected, got $actual." }
   New-Item -ItemType Directory -Force (Split-Path $destination) | Out-Null
   Copy-Item -LiteralPath $output -Destination $destination -Force

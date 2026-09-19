@@ -10,6 +10,15 @@ src-tauri/gen/
 # used in place of a freshly verified download.
 src-tauri/binaries/*.exe
 src-tauri/binaries/*.dll
+# Linux routing-engine and core sidecars. Downloaded by scripts/fetch-linux-*.mjs,
+# which refuse to continue unless the archive digest matches the pinned value in
+# scripts/aether-pins.json / scripts/xray-linux-pins.json. The extracted binary's
+# own SHA-256 is written to a trimmed-down name that leads to the matching engine core.
+src-tauri/binaries/aether
+src-tauri/binaries/aether-*
+src-tauri/binaries/xray
+src-tauri/binaries/xray-*
+src-tauri/binaries/*.sha256
 .npm-cache/
 .env
 *.log

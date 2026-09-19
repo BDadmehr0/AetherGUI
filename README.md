@@ -1,8 +1,24 @@
 # Aethon
 
-Aethon is an independent Windows and Android client for the official [CluvexStudio/Aether](https://github.com/CluvexStudio/Aether) networking core. Windows version 2.1.1 bundles the verified Aether 1.9.0 core and Xray 26.3.27 routing engine, providing system-wide VPN routing or a local SOCKS5 proxy through focused desktop and mobile interfaces.
+Aethon is an independent Windows, Android, and Linux client for the official [CluvexStudio/Aether](https://github.com/CluvexStudio/Aether) networking core. Version 2.1.1 bundles the verified Aether 1.9.0 core and Xray 26.3.27 routing engine, providing system-wide VPN routing or a local SOCKS5 proxy through focused desktop and mobile interfaces.
 
 [Releases](https://github.com/hamvex/AetherGUI/releases) · [Security policy](SECURITY.md) · [Contributing](CONTRIBUTING.md)
+
+## Linux
+
+Linux builds use the same verified Aether core and Xray engine as Windows, with
+a native routing helper instead of the Windows TUN driver. System-wide VPN Mode
+programs the interface (`ip`), the takeover routes, and protected DNS with the
+same single-session semantics; the privilege it needs is scoped to the two
+helper verbs by the polkit action in [`linux/polkit`](linux/polkit). See
+[`linux/README.md`](linux/README.md) for packaging and privilege details.
+
+- Installer formats: `.deb`, `.rpm`, and AppImage (x86_64).
+- The Aether core ships as the static-musl binary per CPU family, so the same
+  package works across glibc variants. ARM64 and ARMv7 hosts use the portable
+  sidecar layout (`aether` and `xray` beside the application binary) described
+  in [`linux/README.md`](linux/README.md), since the per-arch archives are
+  fetched and SHA-256 verified at build time.
 
 ## Windows 2.1.1 release notes
 

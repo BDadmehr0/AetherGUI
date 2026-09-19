@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<!--
+  Authorization for the Aethon Linux routing helper.
+
+  The helper only ever executes the shipped `wrap-aether-gui` entry point with
+  exactly two command lines, each of which re-derives and re-anchors the path it
+  receives from the calling application's own data directory before doing
+  anything privileged. auth_admin_keep means the user authenticates once per
+  session (or once, per a timeout the desktop defines) rather than for every
+  Connect/Disconnect.
+-->
+<policyconfig>
+  <vendor>Aethon</vendor>
+  <vendor_url>https://github.com/hamvex/AetherGUI</vendor_url>
+
+  <action id="com.aethon.aether-gui.routing">
+    <description>Configure system-wide VPN routing for Aethon</description>
+    <message>Authentication is required to configure the Aethon virtual adapter and routing table.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/aethon/wrap-aether-gui</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">"--routing-helper"</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv2">"--repair-network"</annotate>
+  </action>
+</policyconfig>

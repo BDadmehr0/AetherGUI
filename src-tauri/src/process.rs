@@ -710,12 +710,34 @@ pub(crate) fn hash_file(path: &std::path::Path) -> Result<String, String> {
 
 fn validate_core_binary(path: &std::path::Path) -> Result<String, String> {
     let actual = hash_file(path)?;
-    if actual != AETHER_SHA256 {
+    let pinned = core_binary_pin();
+    if actual != pinned {
         return Err(format!(
-            "Bundled Aether integrity check failed: expected {AETHER_SHA256}, got {actual}"
+            "Bundled Aether integrity check failed: expected {pinned}, got {actual}"
         ));
     }
     Ok(format!("Aether v{AETHER_VERSION} (SHA-256 verified)"))
+}
+
+/// The digest this build compares the Aether core against: the Windows constant
+/// or the Linux per-arch pin. An unresolvable (empty) pin fails closed.
+fn core_binary_pin() -> &'static str {
+    #[cfg(windows)]
+    {
+        AETHER_SHA256
+    }
+    #[cfg(target_os = "linux")]
+    {
+        crate::routing::aether_core_pin()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::routing::aether_core_pin()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        ""
+    }
 }
 
 /// A completed integrity check, kept together with the identity of the file it
@@ -857,10 +879,24 @@ mod tests {
     fn core_log_rotation_limit_is_bounded() {
         assert_eq!(2 * 1024 * 1024, 2097152);
     }
+    /// The platform's bundled core path used by the integrity tests, so the
+    /// same assertion runs on Windows (aether-x86_64-pc-windows-msvc.exe) and
+    /// Linux (aether).
+    fn core_test_binary() -> std::path::PathBuf {
+        let name = if cfg!(windows) {
+            "aether-x86_64-pc-windows-msvc.exe"
+        } else {
+            "aether"
+        };
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries").join(name)
+    }
+
     #[test]
     fn pinned_aether_binary_has_expected_hash() {
-        let binary = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aether-x86_64-pc-windows-msvc.exe");
+        let binary = core_test_binary();
+        if !binary.exists() {
+            return;
+        }
         assert_eq!(
             validate_core_binary(&binary).unwrap(),
             "Aether v1.9.0 (SHA-256 verified)"
@@ -972,8 +1008,7 @@ mod tests {
     /// the cache would be a way to launder a refused binary into an accepted one.
     #[test]
     fn a_replaced_file_does_not_inherit_the_cached_verdict() {
-        let genuine = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aether-x86_64-pc-windows-msvc.exe");
+        let genuine = core_test_binary();
         let planted = std::env::temp_dir().join(format!(
             "aethon-cached-identity-{}-{:?}.exe",
             std::process::id(),

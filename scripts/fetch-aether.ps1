@@ -1,4 +1,25 @@
 $ErrorActionPreference = "Stop"
+
+# SHA-256 of a file, lowercase hex, computed with .NET rather than the
+# `Get-FileHash` cmdlet. Every script under `scripts/` runs inside Windows
+# PowerShell 5.1 when invoked through `npm run fetch:*` (the workflow's step
+# shell being pwsh does not change that), and on the hosted runner image that
+# session did not resolve `Get-FileHash`. The .NET computation below is the
+# same one this script already uses for the archive digest, so it is the piece
+# proven to work in that exact environment.
+function Get-Sha256Hex {
+    param([string]$LiteralPath)
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $stream.Dispose()
+        $sha256.Dispose()
+    }
+}
+
 $pins = Get-Content -LiteralPath (Join-Path $PSScriptRoot "aether-pins.json") -Raw | ConvertFrom-Json
 $version = if ($env:AETHER_CORE_VERSION) { $env:AETHER_CORE_VERSION } else { $pins.version }
 $baseUrl = "https://github.com/CluvexStudio/Aether/releases/download/$version"
@@ -31,15 +52,7 @@ try {
   } else {
     Invoke-WebRequest -UseBasicParsing "$baseUrl/$archiveName" -OutFile $archive
   }
-  $stream = [System.IO.File]::OpenRead($archive)
-  $sha256 = [System.Security.Cryptography.SHA256]::Create()
-  try {
-    $actual = ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
-  }
-  finally {
-    $stream.Dispose()
-    $sha256.Dispose()
-  }
+  $actual = Get-Sha256Hex -LiteralPath $archive
   if ($actual -ne $expected) { throw "Aether core checksum mismatch. Expected $expected, got $actual." }
   $expanded = Join-Path $temp "expanded"
   Expand-Archive -LiteralPath $archive -DestinationPath $expanded
@@ -51,7 +64,7 @@ try {
   # here at build time instead of on a user's machine at connect time.
   $expectedBinary = $pins.binary.$archiveName
   if ($version -eq $pins.version -and $expectedBinary) {
-    $actualBinary = (Get-FileHash -LiteralPath $binary.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualBinary = Get-Sha256Hex -LiteralPath $binary.FullName
     if ($actualBinary -ne $expectedBinary) {
       throw "The extracted aether.exe does not match the pin in src-tauri/src/process.rs. Expected $expectedBinary, got $actualBinary."
     }

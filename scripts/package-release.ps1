@@ -1,6 +1,23 @@
 param([string]$Version = "2.1.1", [string]$AndroidVersion = "2.1.1")
 
 $ErrorActionPreference = "Stop"
+
+# SHA-256 of a file, lowercase hex, via .NET — not `Get-FileHash`, which is not
+# resolved in the Windows PowerShell 5.1 session that runs `powershell` scripts
+# on the hosted runner. See scripts/fetch-aether.ps1.
+function Get-Sha256Hex {
+    param([string]$LiteralPath)
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $stream.Dispose()
+        $sha256.Dispose()
+    }
+}
+
 $repo = Split-Path -Parent $PSScriptRoot
 $status = (& git -C $repo status --porcelain)
 if ($status -and $env:AETHON_ALLOW_DIRTY -ne "1") {
@@ -55,7 +72,7 @@ $checksums = Join-Path $releaseDir "SHA256SUMS.txt"
 # file itself and hash it while it is still half-written.
 $artifacts = @(Get-ChildItem -LiteralPath $releaseDir -File | Sort-Object -Property Name)
 $lines = foreach ($artifact in $artifacts) {
-    "$((Get-FileHash -LiteralPath $artifact.FullName -Algorithm SHA256).Hash.ToLower())  $($artifact.Name)"
+    "$(Get-Sha256Hex -LiteralPath $artifact.FullName)  $($artifact.Name)"
 }
 # LF, not CRLF. Add-Content and Set-Content write CRLF on Windows, and `sha256sum -c` then
 # folds the carriage return into the filename and reports every entry as missing - so the
@@ -64,12 +81,10 @@ $lines = foreach ($artifact in $artifacts) {
 
 $bundle = Join-Path $releaseDir "Aethon-VPN-v${Version}-all-platforms.zip"
 Compress-Archive -Path ($artifacts.FullName + @($checksums)) -DestinationPath $bundle -Force
-$bundleHash = Get-FileHash -LiteralPath $bundle -Algorithm SHA256
-[IO.File]::AppendAllText($checksums, "$($bundleHash.Hash.ToLower())  $([IO.Path]::GetFileName($bundle))`n", (New-Object Text.ASCIIEncoding))
+[IO.File]::AppendAllText($checksums, "$(Get-Sha256Hex -LiteralPath $bundle)  $([IO.Path]::GetFileName($bundle))`n", (New-Object Text.ASCIIEncoding))
 
 $manifestEntries = @(Get-ChildItem -LiteralPath $releaseDir -File | Where-Object { $_.Name -ne "AETHON_RELEASE_MANIFEST.json" } | Sort-Object Name | ForEach-Object {
-    $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-    [ordered]@{ artifact = $_.Name; size = $_.Length; sha256 = $hash }
+    [ordered]@{ artifact = $_.Name; size = $_.Length; sha256 = (Get-Sha256Hex -LiteralPath $_.FullName) }
 })
 [ordered]@{
     version = $Version

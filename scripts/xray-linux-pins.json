@@ -1,0 +1,34 @@
+{
+  "_comment": [
+    "Pinned upstream digests for the Xray routing engine's Linux assets.",
+    "",
+    "Same trust model as scripts/linux-sidecar-pins.json: the archive digests come",
+    "from the asset metadata GitHub reports through the releases API for tag",
+    "v26.3.27 (a different source from the release's own .dgst files), and the",
+    "'binary' digests are the SHA-256 of the extracted executables, derived and",
+    "re-checked by the fetch script. The extracted binary's digest is the value",
+    "src-tauri/src/routing.rs's XRAY_SHA256 refuses to launch without.",
+    "",
+    "Aether itself ships no glibc-2.34+ guarantee for its desktop binaries, but the",
+    "static musl core removes that concern for the core. Xray's upstream Linux",
+    "binaries are glibc-linked; the fetch script cannot prove the host toolchain,",
+    "so record the pinned binary digest and let the build-time Rust checks own the",
+    "launch refusal.",
+    "",
+    "Updating the engine means changing its version and every digest in one",
+    "reviewed commit together with XRAY_VERSION / XRAY_SHA256 in routing.rs."
+  ],
+  "version": "v26.3.27",
+  "published": "2026-09-12",
+  "repository": "https://github.com/XTLS/Xray-core",
+  "archives": {
+    "Xray-linux-64.zip": "23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae",
+    "Xray-linux-arm64-v8a.zip": "4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c",
+    "Xray-linux-arm32-v7a.zip": "c7265ae13c63ca0241a037df4ef960ad37938c8a67d984cc08834b2cfdf5654b"
+  },
+  "binary": {
+    "Xray-linux-64.zip": "",
+    "Xray-linux-arm64-v8a.zip": "",
+    "Xray-linux-arm32-v7a.zip": ""
+  }
+}
