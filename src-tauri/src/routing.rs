@@ -1838,6 +1838,14 @@ fn routing_base_dir() -> Result<PathBuf, String> {
             format!("The local application data directory is unavailable: {error}")
         })?);
         let base = local.join(APP_IDENTIFIER).join("routing");
+        // Create before resolving, exactly like the Linux arm: the elevated
+        // helper (and the tests) run with the same environment but must not
+        // assume the unprivileged GUI already made the tree. `canonicalize`
+        // below then fails only for a genuine problem, not for a base that is
+        // simply not there yet.
+        fs::create_dir_all(&base).map_err(|error| {
+            format!("The Aethon routing directory is unavailable: {error}")
+        })?;
         let resolved = strip_verbatim_prefix(
             &fs::canonicalize(&base)
                 .map_err(|error| format!("The Aethon routing directory is unavailable: {error}"))?,
