@@ -54,57 +54,22 @@ Rust target triple for multi-arch cross builds).
 /usr/share/polkit-1/rules.d/com.aethon.aether-gui.rules
 ```
 
-## Release CI (add to `.github/workflows/release.yml`)
+## Release CI (`linux/release.yml`)
 
-The repository workflow file cannot be modified by fork-push from outside the
-project, so the Linux build job ships as the reviewed snippet below instead.
-Add it to `.github/workflows/release.yml` (a `linux` job at the same level as
-`build`, and `needs: [build, linux]` on `publish`) before tagging a Linux
-release:
+The full Linux-enabled release workflow is kept in this folder as
+**`linux/release.yml`**: the upstream `.github/workflows/release.yml` with a
+`Linux build and bundle` job (`ubuntu-latest`, WebKitGTK + rust-toolchain,
+`fetch:linux`, `cargo test --locked`, then `deb`/`rpm`/`AppImage` via
+`tauri.linux.conf.json`) wired into the `publish` job's `needs`, its
+`AetherGui-Linux` artifact downloaded beside the Windows/Android one, and the
+release-notes body updated to mention Linux.
 
-```yaml
-  linux:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: "22"
-          cache: npm
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
-        with:
-          toolchain: stable
-      - name: Install WebKitGTK and Tauri system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
-      - name: Install dependencies
-        run: npm ci
-      - name: Fetch and verify Linux sidecars (x86_64)
-        env:
-          BUILD_TARGET: x86_64-unknown-linux-gnu
-        run: npm run fetch:linux
-      - name: Test frontend
-        run: npm test
-      - name: Test Rust backend
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
-      - name: Build Linux bundles (deb, rpm, AppImage)
-        env:
-          BUILD_TARGET: x86_64-unknown-linux-gnu
-        run: npm run build -- --config src-tauri/tauri.linux.conf.json
-      - name: Stage Linux release files
-        shell: bash
-        run: |
-          mkdir -p linux-release
-          find src-tauri/target/release/bundle -maxdepth 3 -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \) -exec cp {} linux-release/ \;
-          ls -la linux-release
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: AetherGui-Linux
-          path: linux-release/*
-          if-no-files-found: warn
-```
+It is kept here rather than edited in place because the fork-push credential
+outside the project cannot modify `.github/workflows/*` (GitHub App
+`workflows` permission). To enable Linux releases, copy it over the shipped
+workflow — e.g. on the project side run:
+
+    cp linux/release.yml .github/workflows/release.yml
+
+and review the resulting diff before tagging.
+
