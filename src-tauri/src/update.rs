@@ -73,6 +73,7 @@ fn pinned_release_asset(candidate: &str, tag: &str, name: &str) -> Result<reqwes
 /// server, so on its own it proves only that the transfer was intact. This is the check
 /// that says who built the bytes, and it is the reason an attacker who can serve both the
 /// installer and its manifest still cannot get an installer executed.
+#[cfg(windows)]
 fn verify_publisher(path: &std::path::Path, handle: Option<&std::fs::File>) -> Result<(), String> {
     let signer = crate::signature::verify(path, handle)
         .map_err(|error| format!("The installer was rejected: {error}"))?;
@@ -83,6 +84,14 @@ fn verify_publisher(path: &std::path::Path, handle: Option<&std::fs::File>) -> R
         )),
         _ => Ok(()),
     }
+}
+
+/// Linux/macOS update artifacts carry no Authenticode signature; the SHA-256 digest
+/// (single-sourced from the release manifest) is the whole trust claim and is enforced
+/// in the download path. This arm exists so call sites stay platform-neutral.
+#[cfg(not(windows))]
+fn verify_publisher(_path: &std::path::Path, _handle: Option<&std::fs::File>) -> Result<(), String> {
+    Ok(())
 }
 
 /// Open `path` for reading in a way that stops it being replaced while it is trusted.

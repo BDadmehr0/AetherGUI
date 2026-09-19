@@ -1,0 +1,17 @@
+{
+    "$schema": "https://schema.tauri.app/config/2",
+    "bundle": {
+        "active": true,
+        "targets": ["deb", "rpm", "appimage"],
+        "externalBin": ["binaries/xray"],
+        "resources": ["../third-party/xray-LICENSE.txt"],
+        "linux": {
+            "deb": {
+                "files": {
+                    "linux/polkit/actions/com.aethon.aether-gui.policy": "/usr/share/polkit-1/actions/com.aethon.aether-gui.policy"
+                },
+                "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+            }
+        }
+    }
+}

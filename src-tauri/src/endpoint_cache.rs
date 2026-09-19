@@ -268,7 +268,63 @@ pub fn network_fingerprint() -> Option<String> {
                 .collect(),
         )
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // The interface that would carry the next default route, discovered the
+        // same way routing.rs does: `ip route show default`. It must be the
+        // physical link, not our TUN, so like the Windows arm this refuses
+        // our own interface names rather than fingerprinting the tunnel.
+        let out = std::process::Command::new("ip")
+            .args(["route", "show", "default"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let device = stdout
+            .lines()
+            .find_map(|line| {
+                line.split_whitespace()
+                    .position(|token| token == "dev")
+                    .and_then(|index| {
+                        line.split_whitespace().nth(index + 1).and_then(|name| {
+                            let valid = !name.is_empty()
+                                && name
+                                    .chars()
+                                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+                            valid.then_some(name)
+                        })
+                    })
+            })?;
+        if device.starts_with("AethonTun-") {
+            return None;
+        }
+        // The hardware address of that link, read from sysfs; `ip link` output
+        // is localised, `/sys/class/net/<name>/address` is not.
+        let mac = std::fs::read_to_string(format!("/sys/class/net/{device}/address"))
+            .ok()
+            .map(|v| v.trim().replace(':', ""))
+            .filter(|v| !v.is_empty())?;
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(device.as_bytes());
+        hasher.update(b"/");
+        hasher.update(mac.as_bytes());
+        Some(
+            hasher
+                .finalize()
+                .iter()
+                .take(8)
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        )
+    }
+    #[cfg(target_os = "macos")]
+    {
+        None
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         None
     }

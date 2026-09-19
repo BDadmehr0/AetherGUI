@@ -1,0 +1,49 @@
+{
+  "_comment": [
+    "Pinned upstream digests for the Linux sidecars (Aether core and Xray routing",
+    "engine) used by the Linux desktop build.",
+    "",
+    "The release archives and their .sha256 companions live at the same base URL, so",
+    "verifying an archive against the checksum file beside it proves only that the",
+    "transfer was intact - anyone able to replace the release can replace both. These",
+    "values are committed here so the expected digest comes from this repository at",
+    "review time rather than from the server being verified.",
+    "",
+    "Provenance for the Aether archives: the asset digests GitHub itself reports",
+    "through the releases API for tag v1.9.0 (published 2026-09-04T17:17:48Z), which",
+    "is a different source from the release's own .sha256 files. These are the same",
+    "API-sourced values already pinned for the Windows and Android archives in the",
+    "sibling entries of aether-pins.json.",
+    "",
+    "'binary' records the SHA-256 of the executable extracted from each archive. The",
+    "Linux fetch script derives them at fetch time and refuses to proceed unless the",
+    "outer archive digest matched first, so the extracted-bin pin inherits the",
+    "archive's trust; both are then re-checked on disk. These trimmed-down binaries",
+    "are what src-tauri/src/process.rs (AETHER_SHA256) and",
+    "src-tauri/src/routing.rs (XRAY_SHA256) refuse to launch without.",
+    "",
+    "The Linux core exposes exactly the same Aether v1.9.0 build the Windows client",
+    "ships, compiled for x86_64/aarch64/armv7 against a static musl libc so a single",
+    "artifact runs on every Linux distribution of that CPU family (glibc and musl,",
+    "systemd and otherwise). The core is a SOCKS5 provider; system-wide routing in",
+    "VPN Mode is performed by the bundled Xray engine's TUN, exactly as on Windows,",
+    "with the Linux route/DNS programming delegated to an `iproute2` helper behind a",
+    "polkit/sudo prompt.",
+    "",
+    "Updating a version means changing its version and every digest in one reviewed",
+    "commit, and updating the matching constants in process.rs / routing.rs."
+  ],
+  "version": "v1.9.0",
+  "published": "2026-09-04T17:17:48Z",
+  "repository": "https://github.com/CluvexStudio/Aether",
+  "linuxArchives": {
+    "aether-linux-x86_64-musl.tar.gz": "c64adf11b5c9d9d535f9ece31515f8fd4d20dfb217da5289b4b3f20b46af563c",
+    "aether-linux-aarch64-musl.tar.gz": "4bdf1716b002c700b1104f65f9148c1cfb0ae2a3a1a194e31e374809f620e21e",
+    "aether-linux-armv7-musl.tar.gz": "5419968baedbfa7e378bad634f658723e9985db712e3d45ef38bfbc49ba162b7"
+  },
+  "linuxBinary": {
+    "aether-linux-x86_64-musl.tar.gz": "",
+    "aether-linux-aarch64-musl.tar.gz": "",
+    "aether-linux-armv7-musl.tar.gz": ""
+  }
+}

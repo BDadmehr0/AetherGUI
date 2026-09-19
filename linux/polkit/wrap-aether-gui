@@ -1,0 +1,15 @@
+#!/bin/sh
+# Privileged CLI entry point for the Aethon Linux desktop app.
+#
+# This is the command the polkit policy authorizes. It dispatches straight into
+# the installed application GUI binary, which verifies the `sender` of the call
+# is this executable's resolved path (via $(dirname $0)/aether-gui) before it
+# performs any privileged work, so a caller that has not authenticated through
+# this exact file cannot reach the helpers.
+#
+# Invoked by the desktop app as:
+#   pkexec /usr/lib/aethon/wrap-aether-gui --routing-helper /path/to/request.json
+# and, for cleanup:
+#   pkexec /usr/lib/aethon/wrap-aether-gui --repair-network /path/to/session
+AETHON_BIN="${AETHON_BIN:-$(dirname "$0")/aether-gui}"
+exec "$AETHON_BIN" "$@"

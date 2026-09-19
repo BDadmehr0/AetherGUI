@@ -12,6 +12,9 @@
                     "fetch:routing": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-xray.ps1",
                     "fetch:psiphon": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-psiphon.ps1",
                     "fetch:android": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-android-assets.ps1",
+                    "fetch:core:linux": "node scripts/fetch-aether-linux.mjs",
+                    "fetch:routing:linux": "node scripts/fetch-xray-linux.mjs",
+                    "fetch:linux": "node scripts/fetch-aether-linux.mjs && node scripts/fetch-xray-linux.mjs",
                     "build:android": "cd android && gradlew.bat assembleRelease",
                     "package:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-release.ps1"
                 },
