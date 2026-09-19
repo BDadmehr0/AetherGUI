@@ -58,8 +58,9 @@ Rust target triple for multi-arch cross builds).
 
 The full Linux-enabled release workflow is kept in this folder as
 **`linux/release.yml`**: the upstream `.github/workflows/release.yml` with a
-`Linux build and bundle` job (`ubuntu-latest`, WebKitGTK + rust-toolchain,
-`fetch:linux`, `cargo test --locked`, then `deb`/`rpm`/`AppImage` via
+`linux-build-and-bundle` job (display name "Linux build and bundle",
+`ubuntu-latest`, WebKitGTK + rust-toolchain, `fetch:linux`,
+`cargo test --locked`, then `deb`/`rpm`/`AppImage` via
 `tauri.linux.conf.json`) wired into the `publish` job's `needs`, its
 `AetherGui-Linux` artifact downloaded beside the Windows/Android one, and the
 release-notes body updated to mention Linux.
