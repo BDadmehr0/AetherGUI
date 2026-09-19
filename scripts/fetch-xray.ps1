@@ -1,4 +1,22 @@
 $ErrorActionPreference = "Stop"
+
+# SHA-256 of a file, lowercase hex, via .NET — not `Get-FileHash`, which is not
+# resolved in the Windows PowerShell 5.1 session `npm run fetch:routing`
+# starts on the hosted runner (the workflow step's shell is pwsh, but the npm
+# script spawns `powershell.exe`). See scripts/fetch-aether.ps1.
+function Get-Sha256Hex {
+    param([string]$LiteralPath)
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $stream.Dispose()
+        $sha256.Dispose()
+    }
+}
+
 $version = "26.3.27"
 $archiveName = "Xray-windows-64.zip"
 $expected = "d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad"
@@ -20,14 +38,14 @@ try {
   New-Item -ItemType Directory -Force $temp | Out-Null
   $archive = Join-Path $temp $archiveName
   Invoke-WebRequest -UseBasicParsing $url -OutFile $archive
-  $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+  $actual = Get-Sha256Hex -LiteralPath $archive
   if ($actual -ne $expected) { throw "Xray checksum mismatch. Expected $expected, got $actual." }
   $expanded = Join-Path $temp "expanded"
   Expand-Archive -LiteralPath $archive -DestinationPath $expanded
   foreach ($file in @(@("xray.exe", "xray-x86_64-pc-windows-msvc.exe"), @("wintun.dll", "wintun.dll"))) {
     $source = Join-Path $expanded $file[0]
     if (-not (Test-Path -LiteralPath $source)) { throw "$($file[0]) was not found in the verified Xray archive." }
-    $actualFile = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualFile = Get-Sha256Hex -LiteralPath $source
     if ($actualFile -ne $expectedFiles[$file[0]]) {
       throw "$($file[0]) does not match the digest src-tauri/src/routing.rs enforces. Expected $($expectedFiles[$file[0]]), got $actualFile. Update the constant in routing.rs and here in the same reviewed commit."
     }
