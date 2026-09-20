@@ -13,7 +13,7 @@
 // x86_64/aarch64/armv7 binary runs on any Linux distribution of that family.
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,20 +31,44 @@ const BY_ARCH = {
   armv7: { uname: ["armv7l", "armv8l", "arm"], archive: "aether-linux-armv7-musl.tar.gz" },
 };
 
-// Rust target triple → which core archive to fetch and what to name the binary
-// on disk. Windows/Android (and any other platform) are refused up front so a
-// mis-targeted build fails at fetch time rather than shipping an empty bundle.
+// Rust target triple → which core archive to fetch. Only the fully-static
+// musl builds are used so a single artifact covers every glibc and musl system.
+//
+// The staged file is always named `aether-<triple>`: Tauri's
+// `externalBin: ["binaries/aether"]` resolves to
+// `src-tauri/binaries/aether-<target-triple>` at build time, so staging a
+// plain `aether` fails the build with
+// "resource path `binaries/aether-<triple>` doesn't exist".
 const TARGETS = {
-  "x86_64-unknown-linux-gnu": { arch: "x86_64", name: "aether" },
-  "x86_64-unknown-linux-musl": { arch: "x86_64", name: "aether" },
-  "aarch64-unknown-linux-gnu": { arch: "arm64", name: "aether" },
-  "aarch64-unknown-linux-musl": { arch: "arm64", name: "aether" },
-  "armv7-unknown-linux-gnueabihf": { arch: "armv7", name: "aether" },
-  "armv7-unknown-linux-musleabihf": { arch: "armv7", name: "aether" },
+  "x86_64-unknown-linux-gnu": { arch: "x86_64" },
+  "x86_64-unknown-linux-musl": { arch: "x86_64" },
+  "aarch64-unknown-linux-gnu": { arch: "arm64" },
+  "aarch64-unknown-linux-musl": { arch: "arm64" },
+  "armv7-unknown-linux-gnueabihf": { arch: "armv7" },
+  "armv7-unknown-linux-musleabihf": { arch: "armv7" },
 };
 
-const spec = TARGETS[process.env.BUILD_TARGET] ??
-  TARGETS["x86_64-unknown-linux-gnu"];
+// Default to the host CPU when BUILD_TARGET is unset, so a bare
+// `npm run fetch:core:linux` on an ARM machine does not fetch (and mislabel)
+// an x86_64 binary it can neither execute nor bundle.
+const DEFAULT_TARGET_BY_ARCH = {
+  x64: "x86_64-unknown-linux-gnu",
+  arm64: "aarch64-unknown-linux-gnu",
+  arm: "armv7-unknown-linux-gnueabihf",
+};
+const buildTarget =
+  process.env.BUILD_TARGET ||
+  DEFAULT_TARGET_BY_ARCH[process.arch] ||
+  "x86_64-unknown-linux-gnu";
+const spec = TARGETS[buildTarget];
+if (!spec) {
+  // Windows/Android (and any other platform) are refused up front so a
+  // mis-targeted build fails at fetch time rather than shipping an empty bundle.
+  throw new Error(
+    `${buildTarget} is not a supported Linux target (expected one of ${Object.keys(TARGETS).join(", ")})`
+  );
+}
+const fileName = `aether-${buildTarget}`;
 
 function sha256File(path) {
   const hasher = createHash("sha256");
@@ -65,7 +89,7 @@ function recordBinaryPin(archive, digest) {
     throw new Error(
       `The extracted aether binary does not match the pin recorded in ` +
       `scripts/linux-sidecar-pins.json. Expected ${existing}, got ${digest}. ` +
-      `Update AETHER_SHA256 in src-tauri/src/process.rs in the same reviewed commit.`
+      `Update aether_core_pins in src-tauri/src/routing.rs in the same reviewed commit.`
     );
   }
   if (!existing) {
@@ -154,15 +178,21 @@ async function main() {
 
   const destDir = resolve(repo, "src-tauri", "binaries");
   mkdirSync(destDir, { recursive: true });
-  copyFileSync(binaryPath, join(destDir, spec.name));
+  const dest = join(destDir, fileName);
+  copyFileSync(binaryPath, dest);
+  // The bundler preserves the file mode into deb/rpm/AppImage, and the staged
+  // copy must be executable for the shipped app (and the `cargo test` engine
+  // checks) to run it. Set explicitly: copyFileSync is not guaranteed to carry
+  // the executable bit across filesystems.
+  chmodSync(dest, 0o755);
   writeFileSync(
-    join(destDir, `${spec.name}.sha256`),
-    `${binaryDigest}  ${spec.name}\n`
+    join(destDir, `${fileName}.sha256`),
+    `${binaryDigest}  ${fileName}\n`
   );
   console.log(
     `[fetch] prepared verified Aether ${pins.version} core ` +
-    `(${meta.archive}) for ${process.env.BUILD_TARGET || spec.arch} ` +
-    `as ${spec.name}; binary SHA256 ${binaryDigest}`
+    `(${meta.archive}) for ${buildTarget} ` +
+    `as ${fileName}; binary SHA256 ${binaryDigest}`
   );
   rmSync(workDir, { recursive: true, force: true });
 }

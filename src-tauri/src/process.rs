@@ -879,22 +879,32 @@ mod tests {
     fn core_log_rotation_limit_is_bounded() {
         assert_eq!(2 * 1024 * 1024, 2097152);
     }
-    /// The platform's bundled core path used by the integrity tests, so the
-    /// same assertion runs on Windows (aether-x86_64-pc-windows-msvc.exe) and
-    /// Linux (aether).
+    /// The platform's staged core path used by the integrity tests, so the
+    /// same assertion runs on Windows (`aether-x86_64-pc-windows-msvc.exe`)
+    /// and Linux (`aether-<triple>`, preferring the triple matching this
+    /// build). When nothing was staged the primary triple's path is returned
+    /// so the caller's `exists()` check skips cleanly.
     fn core_test_binary() -> std::path::PathBuf {
-        let name = if cfg!(windows) {
-            "aether-x86_64-pc-windows-msvc.exe"
-        } else {
-            "aether"
-        };
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries").join(name)
+        #[cfg(not(target_os = "linux"))]
+        let staged = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
+        #[cfg(windows)]
+        let binary = staged.join("aether-x86_64-pc-windows-msvc.exe");
+        #[cfg(target_os = "linux")]
+        let binary = crate::routing::linux_staged_sidecar("aether");
+        #[cfg(not(any(windows, target_os = "linux")))]
+        let binary = staged.join("aether");
+        binary
     }
 
     #[test]
     fn pinned_aether_binary_has_expected_hash() {
         let binary = core_test_binary();
-        if !binary.exists() {
+        // An empty pin (Linux before a reviewed fetch populates
+        // aether_core_pins) means "refuse to start", so the assertion is
+        // skipped rather than inverted for that not-yet-reviewed state —
+        // mirroring routing's pinned-hash test. The fail-closed gate itself is
+        // still held by the substitution tests below on every platform.
+        if !binary.exists() || core_binary_pin().is_empty() {
             return;
         }
         assert_eq!(
@@ -1009,6 +1019,13 @@ mod tests {
     #[test]
     fn a_replaced_file_does_not_inherit_the_cached_verdict() {
         let genuine = core_test_binary();
+        // The accept half needs a staged core AND a populated pin; without
+        // either (Linux before a reviewed fetch) there is no genuine verdict
+        // to contrast with, so the test skips. The refusal half is covered
+        // unconditionally by the substitution tests above.
+        if !genuine.is_file() || core_binary_pin().is_empty() {
+            return;
+        }
         let planted = std::env::temp_dir().join(format!(
             "aethon-cached-identity-{}-{:?}.exe",
             std::process::id(),

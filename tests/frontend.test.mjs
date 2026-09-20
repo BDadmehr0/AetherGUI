@@ -320,6 +320,39 @@ test('Windows VPN lifecycle retains elevation, recovery, TUN readiness, and clea
   assert.match(routing, /No Aethon network state was found to repair/);
 });
 
+test('Linux sidecars use target-tripled names and bundle both engines', async () => {
+  const [overlay, fetchAether, fetchXray, sidecar, routing] = await Promise.all([
+    read('../src-tauri/tauri.linux.conf.json'),
+    read('../scripts/fetch-aether-linux.mjs'),
+    read('../scripts/fetch-xray-linux.mjs'),
+    read('../scripts/prepare-sidecar.mjs'),
+    read('../src-tauri/src/routing.rs')
+  ]);
+  // The platform file replaces the base bundle arrays (Tauri merges by
+  // overwrite), so it must repeat every externalBin entry: listing only xray
+  // would silently drop the Aether core from the Linux bundle.
+  const linux = JSON.parse(overlay);
+  assert.ok(linux.bundle.externalBin.includes('binaries/aether'));
+  assert.ok(linux.bundle.externalBin.includes('binaries/xray'));
+  // Tauri resolves `binaries/<stem>` to `binaries/<stem>-<target-triple>`; a
+  // plain `aether`/`xray` fails the build with "resource path ... doesn't exist".
+  assert.match(fetchAether, /`aether-\$\{buildTarget\}`/);
+  assert.match(fetchXray, /`xray-\$\{buildTarget\}`/);
+  assert.match(sidecar, /`aether-\$\{buildTarget\}`/);
+  // The archive digest is verified before anything is extracted: the staged
+  // binary inherits its trust from the pinned archive digest, never from the
+  // transport it arrived over.
+  assert.match(fetchAether, /actual !== expected/);
+  assert.match(fetchXray, /actual !== expected/);
+  // The staged copies must be executable: the bundler preserves the file mode
+  // into deb/rpm/AppImage, and copyFileSync does not guarantee the bit survives.
+  assert.match(fetchAether, /chmodSync\(dest, 0o755\)/);
+  assert.match(fetchXray, /chmodSync\(dest, 0o755\)/);
+  // Debug builds and the pinned-hash tests resolve the same tripled names.
+  assert.match(routing, /linux_staged_sidecar\("xray"\)/);
+  assert.match(routing, /pub\(crate\) fn linux_sidecar_names/);
+});
+
 test('Android reference retains VPNService, RTL, and application picker', async () => {
   const [manifest, activity, service, picker, gradle] = await Promise.all([
     read('../android/app/src/main/AndroidManifest.xml'),

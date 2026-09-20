@@ -3,7 +3,7 @@
     "bundle": {
         "active": true,
         "targets": ["deb", "rpm", "appimage"],
-        "externalBin": ["binaries/xray"],
+        "externalBin": ["binaries/aether", "binaries/xray"],
         "resources": ["../third-party/xray-LICENSE.txt"],
         "linux": {
             "deb": {
