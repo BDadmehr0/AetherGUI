@@ -201,11 +201,17 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Signing finalized Windows artifacts failed.' }
           }
           Compress-Archive -Path portable/* -DestinationPath "release/Aethon-VPN-v${version}-Windows-x64-portable.zip" -Force
-          Copy-Item android/app/build/outputs/apk/release/app-universal-release.apk "release/Aethon-VPN-v${version}-Android-Universal.apk"
-          Copy-Item android/app/build/outputs/apk/release/app-armeabi-v7a-release.apk "release/Aethon-VPN-v${version}-Android-ARMv7.apk"
-          Copy-Item android/app/build/outputs/apk/release/app-arm64-v8a-release.apk "release/Aethon-VPN-v${version}-Android-ARM64.apk"
-          Copy-Item android/app/build/outputs/apk/release/app-x86_64-release.apk "release/Aethon-VPN-v${version}-Android-x86_64.apk"
-          Copy-Item android/app/build/outputs/bundle/release/app-release.aab "release/Aethon-VPN-v${version}-Android-AAB.aab"
+          # Signed release APKs only exist off-PR (the signing-key steps above are
+          # skipped on pull requests, where only the debug validation build runs).
+          # The manifest/SHA logic below enumerates whatever landed in `release`,
+          # so skipping these on PRs is safe.
+          if ('${{ github.event_name }}' -ne 'pull_request') {
+            Copy-Item android/app/build/outputs/apk/release/app-universal-release.apk "release/Aethon-VPN-v${version}-Android-Universal.apk"
+            Copy-Item android/app/build/outputs/apk/release/app-armeabi-v7a-release.apk "release/Aethon-VPN-v${version}-Android-ARMv7.apk"
+            Copy-Item android/app/build/outputs/apk/release/app-arm64-v8a-release.apk "release/Aethon-VPN-v${version}-Android-ARM64.apk"
+            Copy-Item android/app/build/outputs/apk/release/app-x86_64-release.apk "release/Aethon-VPN-v${version}-Android-x86_64.apk"
+            Copy-Item android/app/build/outputs/bundle/release/app-release.aab "release/Aethon-VPN-v${version}-Android-AAB.aab"
+          }
 
           # The file list is materialised before anything is written back into `release`.
           # Streaming Get-ChildItem straight into a loop that appends SHA256SUMS.txt to the

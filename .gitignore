@@ -19,6 +19,10 @@ src-tauri/binaries/aether-*
 src-tauri/binaries/xray
 src-tauri/binaries/xray-*
 src-tauri/binaries/*.sha256
+# Download cache for the scripts/fetch-*-linux.mjs sidecar scripts (verified
+# upstream archives and extraction scratch dirs). Reproducible from the pinned
+# digests at any time; never source-controlled.
+scripts/cache/
 .npm-cache/
 .env
 *.log

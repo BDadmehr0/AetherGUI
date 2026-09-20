@@ -1362,7 +1362,7 @@ fn routing_firewall_kind() -> String {
             } else if which_in_path("iptables").is_some() {
                 "iptables".to_string()
             } else {
-                "none"
+                "none".to_string()
             }
         }
     }
@@ -2443,18 +2443,70 @@ fn xray_binary_name() -> &'static str {
     }
 }
 
+/// The file names a Linux sidecar may have been staged under, most likely first.
+///
+/// Tauri's `externalBin: ["binaries/<stem>"]` resolves to
+/// `src-tauri/binaries/<stem>-<target-triple>`, so the fetch scripts stage the
+/// tripled name; the plain `<stem>` is the legacy name older fetch runs left
+/// behind and is only a fallback for checkouts that still carry one.
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_sidecar_names(stem: &str) -> Vec<String> {
+    let triples: &[&str] = match std::env::consts::ARCH {
+        "x86_64" => &["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"],
+        "aarch64" => &["aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl"],
+        "arm" => &["armv7-unknown-linux-gnueabihf", "armv7-unknown-linux-musleabihf"],
+        _ => &[],
+    };
+    let mut names: Vec<String> = triples
+        .iter()
+        .map(|triple| format!("{stem}-{triple}"))
+        .collect();
+    // Prefer the libc this build targets: a gnu build almost certainly staged
+    // the gnu triple.
+    if cfg!(target_env = "musl") {
+        names.reverse();
+    }
+    names.push(stem.to_string());
+    names
+}
+
+/// The staged Linux sidecar for `stem` (`aether` or `xray`) under
+/// `src-tauri/binaries`, preferring the triple matching this build.
+///
+/// Used by the pinned-hash tests. When nothing was staged, the primary triple's
+/// path is returned so the caller's `exists()` check skips cleanly instead of
+/// hashing a file that was never fetched.
+#[cfg(all(target_os = "linux", test))]
+pub(crate) fn linux_staged_sidecar(stem: &str) -> PathBuf {
+    let staged = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
+    linux_sidecar_names(stem)
+        .into_iter()
+        .map(|name| staged.join(name))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| {
+            let triple = match std::env::consts::ARCH {
+                "aarch64" => "aarch64-unknown-linux-gnu",
+                "arm" => "armv7-unknown-linux-gnueabihf",
+                _ => "x86_64-unknown-linux-gnu",
+            };
+            staged.join(format!("{stem}-{triple}"))
+        })
+}
+
 fn xray_candidates(current_dir: &Path) -> Vec<PathBuf> {
     let mut candidates = vec![current_dir.join(xray_binary_name())];
     if cfg!(debug_assertions) {
-        candidates.push(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("binaries")
-                .join(if cfg!(windows) {
-                    "xray-x86_64-pc-windows-msvc.exe"
-                } else {
-                    "xray"
-                }),
+        let staged = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
+        #[cfg(windows)]
+        candidates.push(staged.join("xray-x86_64-pc-windows-msvc.exe"));
+        #[cfg(target_os = "linux")]
+        candidates.extend(
+            linux_sidecar_names("xray")
+                .into_iter()
+                .map(|name| staged.join(name)),
         );
+        #[cfg(not(any(windows, target_os = "linux")))]
+        candidates.push(staged.join("xray"));
     }
     // Packaged Linux layouts place the engine beside the helper, not beside the
     // GUI: /usr/lib/aethon/xray. Deriving it from the current executable keeps
@@ -2538,18 +2590,25 @@ const WINTUN_PUBLISHER: &str = "WireGuard LLC";
 ///
 /// Each arch derivative of `xray` (a build variant of the same upstream Xray
 /// version) has its own SHA-256, recorded in scripts/xray-linux-pins.json and
-/// mirrored here for the arch the release can build:
-/// `x86_64`, `aarch64`, and `armv7` (32-bit ARMv7). Update these alongside a
-/// fetch-script/CI bump in one reviewed commit.
+/// mirrored here for every arch the release can build: `x86_64`, `aarch64`,
+/// and `armv7` (32-bit ARMv7). Update these alongside a fetch-script/CI bump
+/// in one reviewed commit.
+///
+/// Populating an empty pin: run `BUILD_TARGET=<triple> npm run
+/// fetch:routing:linux` on a machine that can reach the upstream release (or
+/// read the `[fetch] recorded first-seen binary digest` line a CI run prints),
+/// confirm the archive digest matched the pin in scripts/xray-linux-pins.json,
+/// then copy the recorded binary digest here and into that file's `binary` map
+/// in the same reviewed commit. Until then the empty pin fails closed: the
+/// engine is refused at runtime and the pinned-hash tests skip.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[allow(non_upper_case_globals)]
 pub mod linux_engine_pins {
-    /// Xray 26.3.27 Linux x86_64 binary digest — populate by running
-    /// `npm run fetch:routing:linux` once and reviewing the recorded value.
+    /// Xray 26.3.27 Linux x86_64 binary digest (`Xray-linux-64.zip`).
     pub const XRAY_SHA256_X86_64: &str = "";
-    /// Xray 26.3.27 Linux aarch64 binary digest.
+    /// Xray 26.3.27 Linux aarch64 binary digest (`Xray-linux-arm64-v8a.zip`).
     pub const XRAY_SHA256_AARCH64: &str = "";
-    /// Xray 26.3.27 Linux armv7 binary digest.
+    /// Xray 26.3.27 Linux armv7 binary digest (`Xray-linux-arm32-v7a.zip`).
     pub const XRAY_SHA256_ARMV7: &str = "";
 
     /// The digest the current build architecture enforces. An empty constant
@@ -2610,11 +2669,24 @@ fn xray_binary_pin() -> &'static str {
 /// digest is recorded in scripts/linux-sidecar-pins.json and mirrored here.
 /// Keep this in lock-step with a fetch-script/CI version bump in one reviewed
 /// commit. Empty means "refuse to launch" — a digest is never guessed.
+///
+/// Populating an empty pin: run `BUILD_TARGET=<triple> npm run
+/// fetch:core:linux` on a machine that can reach the upstream release (or read
+/// the `[fetch] recorded first-seen binary digest` line a CI run prints),
+/// confirm the archive digest matched the pin in
+/// scripts/linux-sidecar-pins.json, then copy the recorded binary digest here
+/// and into that file's `linuxBinary` map in the same reviewed commit.
 #[cfg(target_os = "linux")]
 #[allow(non_upper_case_globals)]
 pub mod aether_core_pins {
+    /// Aether v1.9.0 Linux x86_64 binary digest
+    /// (`aether-linux-x86_64-musl.tar.gz`).
     pub const AETHER_SHA256_X86_64: &str = "";
+    /// Aether v1.9.0 Linux aarch64 binary digest
+    /// (`aether-linux-aarch64-musl.tar.gz`).
     pub const AETHER_SHA256_AARCH64: &str = "";
+    /// Aether v1.9.0 Linux armv7 binary digest
+    /// (`aether-linux-armv7-musl.tar.gz`).
     pub const AETHER_SHA256_ARMV7: &str = "";
 }
 
@@ -3023,19 +3095,19 @@ mod tests {
 
     #[test]
     fn pinned_xray_binary_has_expected_version_and_hash() {
-        // The Windows archive extracts to a target-tripled name; the Linux one
-        // extracts to plain `xray`. The pin itself is per-platform: Windows XRAY_SHA256
-        // or the Linux per-arch constant, which stays empty until the first
-        // `npm run fetch:routing:linux` records it. An empty pin means "refuse to
-        // start", so the assertion is skipped rather than inverted for that
-        // not-yet-reviewed state.
+        // Both platforms stage a target-tripled name (`xray-<triple>`); the
+        // Linux lookup prefers the triple matching this build. The pin itself
+        // is per-platform: Windows XRAY_SHA256 or the Linux per-arch constant,
+        // which stays empty until a reviewed fetch populates it. An empty pin
+        // means "refuse to start", so the assertion is skipped rather than
+        // inverted for that not-yet-reviewed state.
+        #[cfg(windows)]
         let engine = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries")
-            .join(if cfg!(windows) {
-                "xray-x86_64-pc-windows-msvc.exe"
-            } else {
-                "xray"
-            });
+            .join("binaries/xray-x86_64-pc-windows-msvc.exe");
+        #[cfg(target_os = "linux")]
+        let engine = linux_staged_sidecar("xray");
+        #[cfg(not(any(windows, target_os = "linux")))]
+        let engine = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries/xray");
         if !engine.exists() || xray_binary_pin().is_empty() {
             return;
         }
@@ -3114,9 +3186,15 @@ mod tests {
             .filter(|path| path.starts_with(&manifest))
             .collect();
         if cfg!(debug_assertions) {
+            // Windows stages one tripled name; Linux tries the triples for this
+            // build's arch (gnu + musl) plus a legacy plain fallback.
+            #[cfg(target_os = "linux")]
+            let expected = linux_sidecar_names("xray").len();
+            #[cfg(not(target_os = "linux"))]
+            let expected = 1;
             assert_eq!(
                 leaks.len(),
-                1,
+                expected,
                 "the dev tree should still be searched in debug"
             );
         } else {
@@ -3178,6 +3256,9 @@ mod tests {
         assert!(validate_wintun(&missing).is_err());
     }
 
+    // Wintun is a Windows driver: the candidate search it covers does not exist
+    // on other platforms.
+    #[cfg(windows)]
     #[test]
     fn the_release_build_does_not_search_the_build_machines_source_tree() {
         // CARGO_MANIFEST_DIR is an absolute path on whichever machine ran the build. It is

@@ -2,15 +2,28 @@
 //
 // Windows builds read the verified `aether-x86_64-pc-windows-msvc.exe`
 // (produced by scripts/fetch-aether.ps1). Linux builds read the verified
-// `aether` produced by scripts/fetch-aether-linux.mjs for BUILD_TARGET. The
-// names match what src-tauri/src/process.rs resolves and hash-checks before
-// anything is spawned.
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+// `aether-<triple>` produced by scripts/fetch-aether-linux.mjs for
+// BUILD_TARGET: Tauri's `externalBin: ["binaries/aether"]` resolves to
+// `src-tauri/binaries/aether-<target-triple>` at build time, so the staged
+// name must carry the triple or the build fails with
+// "resource path `binaries/aether-<triple>` doesn't exist".
+import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 
+// Must agree with the fetch scripts: the triple in the staged file name has to
+// be the triple the Rust build targets, and an unset BUILD_TARGET means the
+// host CPU, not unconditionally x86_64.
+const DEFAULT_LINUX_TARGET_BY_ARCH = {
+  x64: "x86_64-unknown-linux-gnu",
+  arm64: "aarch64-unknown-linux-gnu",
+  arm: "armv7-unknown-linux-gnueabihf",
+};
+const buildTarget =
+  process.env.BUILD_TARGET ||
+  DEFAULT_LINUX_TARGET_BY_ARCH[process.arch] ||
+  "x86_64-unknown-linux-gnu";
 const linux = process.platform === "linux" || /linux/.test(process.env.BUILD_TARGET || "");
-const target = linux ? "unknown-linux" : "x86_64-pc-windows-msvc";
-const fileName = linux ? "aether" : `aether-${target}.exe`;
+const fileName = linux ? `aether-${buildTarget}` : `aether-x86_64-pc-windows-msvc.exe`;
 
 const destination = resolve("src-tauri/binaries", fileName);
 if (existsSync(destination) && !process.env.AETHER_CORE_BINARY) {
@@ -31,4 +44,9 @@ if (!source) {
 
 mkdirSync(resolve("src-tauri/binaries"), { recursive: true });
 copyFileSync(source, destination);
+if (linux) {
+  // The bundler preserves the file mode into the Linux packages; the staged
+  // copy must be executable for the shipped app to spawn it.
+  chmodSync(destination, 0o755);
+}
 console.log(`Bundling Aether core from ${source}`);
