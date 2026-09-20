@@ -95,8 +95,11 @@ pub fn launch_elevated(mode: &str, path: &Path) -> Result<(), String> {
             )
         })?;
 
-    let args = [mode, &path.to_string_lossy().into_owned()];
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    // The path argument is bound before the array is built so the `&str`
+    // inside it never borrows a temporary.
+    let path_arg = path.to_string_lossy().into_owned();
+    let args = [mode, path_arg.as_str()];
+    let arg_refs: Vec<&str> = args.iter().copied().collect();
     let mut attempts = Vec::new();
     for tool in ESCALATION_ORDER {
         match try_escalate(tool, &wrapper, &arg_refs) {

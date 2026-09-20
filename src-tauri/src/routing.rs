@@ -1362,7 +1362,7 @@ fn routing_firewall_kind() -> String {
             } else if which_in_path("iptables").is_some() {
                 "iptables".to_string()
             } else {
-                "none"
+                "none".to_string()
             }
         }
     }
@@ -3256,6 +3256,9 @@ mod tests {
         assert!(validate_wintun(&missing).is_err());
     }
 
+    // Wintun is a Windows driver: the candidate search it covers does not exist
+    // on other platforms.
+    #[cfg(windows)]
     #[test]
     fn the_release_build_does_not_search_the_build_machines_source_tree() {
         // CARGO_MANIFEST_DIR is an absolute path on whichever machine ran the build. It is
