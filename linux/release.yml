@@ -30,6 +30,7 @@ jobs:
     outputs:
       windows-signed: ${{ steps.signing-gate.outputs.signed }}
       publisher: ${{ steps.signing-gate.outputs.publisher }}
+      android-signed: ${{ steps.android-signing.outputs.available }}
     steps:
       # actions/checkout v4.4.0
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -127,18 +128,82 @@ jobs:
       - name: Fetch verified Android native assets
         run: npm run fetch:android
 
-      - name: Prepare Android signing key
-        if: github.event_name != 'pull_request'
+      - name: Select Android signing configuration
+        id: android-signing
+        # Same shape as the Windows signing selection above. Absent credentials are a
+        # repository configuration problem, not a code problem, so a branch or pull
+        # request build degrades to the unsigned debug validation build instead of
+        # failing the whole job after the Windows bundle is already done. On a tag it is
+        # fatal: `publish` would otherwise attach unsigned APKs to a release whose notes
+        # claim the Android packages are release-signed.
         shell: pwsh
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          if (-not $env:ANDROID_KEYSTORE_BASE64) { throw 'ANDROID_KEYSTORE_BASE64 is not configured.' }
-          New-Item -ItemType Directory -Force android/.android-signing | Out-Null
-          [IO.File]::WriteAllBytes("android/.android-signing/firstham-aethergui.jks", [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
+          $required = [ordered]@{
+            ANDROID_KEYSTORE_BASE64   = $env:ANDROID_KEYSTORE_BASE64
+            ANDROID_KEYSTORE_PASSWORD = $env:ANDROID_KEYSTORE_PASSWORD
+            ANDROID_KEY_ALIAS         = $env:ANDROID_KEY_ALIAS
+            ANDROID_KEY_PASSWORD      = $env:ANDROID_KEY_PASSWORD
+          }
+          # Named in the message so a partially configured repository says which half is
+          # missing, instead of reporting one secret and hiding the other three.
+          $missing = @($required.Keys | Where-Object { -not $required[$_] })
+          $available = $missing.Count -eq 0
+          "available=$($available.ToString().ToLowerInvariant())" | Add-Content $env:GITHUB_OUTPUT
+          if ($available) {
+            Write-Host 'Android release signing credentials are present: the APKs and the AAB will be release-signed.'
+          } elseif ('${{ github.ref }}'.StartsWith('refs/tags/')) {
+            throw "RELEASE BLOCKED: Android signing secrets are not configured ($($missing -join ', ')). A tag must produce release-signed APKs, so nothing will be published."
+          } else {
+            Write-Host "::warning::Android signing secrets are not configured ($($missing -join ', ')). Building the unsigned debug variant for compile and lint coverage; no Android artifacts will be staged."
+          }
+
+      - name: Prepare Android signing key
+        if: steps.android-signing.outputs.available == 'true'
+        shell: pwsh
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          # Decoded and verified here rather than discovered by Gradle: a truncated,
+          # line-wrapped, or password-mismatched secret otherwise surfaces minutes later
+          # as an opaque signing failure with the whole Windows bundle already built.
+          $directory = 'android/.android-signing'
+          $keystore = Join-Path $directory 'firstham-aethergui.jks'
+          New-Item -ItemType Directory -Force $directory | Out-Null
+          try {
+            # Whitespace stripped first: a secret pasted from `certutil`/`base64` output
+            # carries line breaks, which FromBase64String rejects outright.
+            $bytes = [Convert]::FromBase64String(($env:ANDROID_KEYSTORE_BASE64 -replace '\s', ''))
+          } catch {
+            throw 'ANDROID_KEYSTORE_BASE64 is not valid base64. Re-encode the keystore with [Convert]::ToBase64String([IO.File]::ReadAllBytes("<keystore>")) and update the secret.'
+          }
+          if ($bytes.Length -lt 32) { throw "ANDROID_KEYSTORE_BASE64 decoded to only $($bytes.Length) bytes; the secret is truncated or empty." }
+          # JKS begins with the 0xFEEDFEED magic. A PKCS12 keystore - what a current
+          # `keytool -genkeypair` writes, and what an exported ".jks" frequently really
+          # is - begins with a DER SEQUENCE, 0x30 0x82. Anything else is not a keystore,
+          # and writing it out would only move the failure into Gradle.
+          $isJks = ($bytes[0] -eq 0xFE) -and ($bytes[1] -eq 0xED) -and ($bytes[2] -eq 0xFE) -and ($bytes[3] -eq 0xED)
+          $isP12 = ($bytes[0] -eq 0x30) -and ($bytes[1] -eq 0x82)
+          if (-not ($isJks -or $isP12)) { throw 'ANDROID_KEYSTORE_BASE64 does not decode to a JKS or PKCS12 keystore.' }
+          [IO.File]::WriteAllBytes($keystore, $bytes)
+          Write-Host "Keystore written: $($bytes.Length) bytes, format $(if ($isJks) { 'JKS' } else { 'PKCS12' })."
+          # `-storepass:env` keeps the password off the process command line. This proves
+          # the store password is right and the pinned alias exists in this keystore; the
+          # key password is only consumed later, by Gradle, when it actually signs.
+          & keytool -list -keystore $keystore -alias $env:ANDROID_KEY_ALIAS -storepass:env ANDROID_KEYSTORE_PASSWORD
+          if ($LASTEXITCODE -ne 0) {
+            Remove-Item -LiteralPath $directory -Recurse -Force
+            throw "keytool could not read alias `"$($env:ANDROID_KEY_ALIAS)`" from the decoded keystore: ANDROID_KEYSTORE_PASSWORD or ANDROID_KEY_ALIAS does not match ANDROID_KEYSTORE_BASE64."
+          }
 
       - name: Build signed Android APKs
-        if: github.event_name != 'pull_request'
+        if: steps.android-signing.outputs.available == 'true'
         shell: pwsh
         env:
           ANDROID_KEYSTORE_PATH: .android-signing/firstham-aethergui.jks
@@ -152,15 +217,21 @@ jobs:
       - name: Remove the Android signing key from the workspace
         # `always()` so the key does not survive a failed Gradle run either. The runner is
         # ephemeral, but nothing after this point has any reason to be able to read it.
-        if: always() && github.event_name != 'pull_request'
+        if: always()
         shell: pwsh
         run: |
           if (Test-Path android/.android-signing) {
             Remove-Item -LiteralPath android/.android-signing -Recurse -Force
           }
 
-      - name: Validate Android pull request build
-        if: github.event_name == 'pull_request'
+      - name: Validate Android build without release signing
+        # Pull requests never receive repository secrets, and a branch whose secrets are
+        # not configured still has to prove the Android project compiles and passes lint.
+        # `assembleDebug` is signed with the throwaway SDK debug key and is deliberately
+        # not staged below. There is no path from this step to a distributable artifact:
+        # android/app/build.gradle throws if a release build is requested without
+        # credentials, so an unsigned release APK cannot be produced at all.
+        if: steps.android-signing.outputs.available != 'true'
         shell: pwsh
         run: |
           Set-Location android
@@ -201,11 +272,12 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Signing finalized Windows artifacts failed.' }
           }
           Compress-Archive -Path portable/* -DestinationPath "release/Aethon-VPN-v${version}-Windows-x64-portable.zip" -Force
-          # Signed release APKs only exist off-PR (the signing-key steps above are
-          # skipped on pull requests, where only the debug validation build runs).
+          # Signed release APKs only exist when the Android signing gate above found
+          # credentials. Pull requests never receive secrets, and a branch build without
+          # them produces only debug APKs, which are not distributable and are not staged.
           # The manifest/SHA logic below enumerates whatever landed in `release`,
-          # so skipping these on PRs is safe.
-          if ('${{ github.event_name }}' -ne 'pull_request') {
+          # so skipping these is safe.
+          if ('${{ steps.android-signing.outputs.available }}' -eq 'true') {
             Copy-Item android/app/build/outputs/apk/release/app-universal-release.apk "release/Aethon-VPN-v${version}-Android-Universal.apk"
             Copy-Item android/app/build/outputs/apk/release/app-armeabi-v7a-release.apk "release/Aethon-VPN-v${version}-Android-ARMv7.apk"
             Copy-Item android/app/build/outputs/apk/release/app-arm64-v8a-release.apk "release/Aethon-VPN-v${version}-Android-ARM64.apk"
@@ -338,10 +410,17 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Require a signed Windows build
+      - name: Require signed Windows and Android builds
         run: |
           if [ "${{ needs.build.outputs.windows-signed }}" != "true" ]; then
             echo "RELEASE BLOCKED: the Windows signing gate did not pass." >&2
+            exit 1
+          fi
+          # The build job already fails on a tag when the Android secrets are missing, so
+          # this is the second lock: it also catches a tag run where the gate was satisfied
+          # but no release-signed APKs were actually staged.
+          if [ "${{ needs.build.outputs.android-signed }}" != "true" ]; then
+            echo "RELEASE BLOCKED: the Android packages in this build were not release-signed." >&2
             exit 1
           fi
       # actions/download-artifact v4.3.0
