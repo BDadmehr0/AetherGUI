@@ -8,7 +8,7 @@
         "linux": {
             "deb": {
                 "files": {
-                    "linux/polkit/actions/com.aethon.aether-gui.policy": "/usr/share/polkit-1/actions/com.aethon.aether-gui.policy"
+                    "/usr/share/polkit-1/actions/com.aethon.aether-gui.policy": "../linux/polkit/actions/com.aethon.aether-gui.policy"
                 },
                 "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
             }

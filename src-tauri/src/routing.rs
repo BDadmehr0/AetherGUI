@@ -2476,7 +2476,7 @@ pub(crate) fn linux_sidecar_names(stem: &str) -> Vec<String> {
 /// Used by the pinned-hash tests. When nothing was staged, the primary triple's
 /// path is returned so the caller's `exists()` check skips cleanly instead of
 /// hashing a file that was never fetched.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 pub(crate) fn linux_staged_sidecar(stem: &str) -> PathBuf {
     let staged = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
     linux_sidecar_names(stem)
