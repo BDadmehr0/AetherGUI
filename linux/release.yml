@@ -114,8 +114,11 @@ jobs:
           AETHON_SIGN_ENDPOINT: ${{ secrets.AETHON_SIGN_ENDPOINT }}
           AETHON_SIGN_ACCOUNT: ${{ secrets.AETHON_SIGN_ACCOUNT }}
           AETHON_SIGN_CERT_PROFILE: ${{ secrets.AETHON_SIGN_CERT_PROFILE }}
+          WINDOWS_SIGNING_AVAILABLE: ${{ steps.signing.outputs.available }}
         run: |
-          if ('${{ steps.signing.outputs.available }}' -eq 'true') {
+          # Passed through `env` instead of interpolated, so no step output is ever spliced
+          # into the script text that PowerShell then parses.
+          if ($env:WINDOWS_SIGNING_AVAILABLE -eq 'true') {
             # The overlay adds bundle.windows.signCommand, so the application binary is
             # signed before it is packed into the MSI and the NSIS installer, and the
             # installers are signed afterwards. Signing the finished installers alone would
@@ -156,7 +159,10 @@ jobs:
           "available=$($available.ToString().ToLowerInvariant())" | Add-Content $env:GITHUB_OUTPUT
           if ($available) {
             Write-Host 'Android release signing credentials are present: the APKs and the AAB will be release-signed.'
-          } elseif ('${{ github.ref }}'.StartsWith('refs/tags/')) {
+          # GITHUB_REF is read from the environment rather than expanded from the github.ref
+          # context: a ref name embeds a branch or tag name, and splicing that into a script
+          # body would let a crafted ref name become PowerShell.
+          } elseif ($env:GITHUB_REF.StartsWith('refs/tags/')) {
             throw "RELEASE BLOCKED: Android signing secrets are not configured ($($missing -join ', ')). A tag must produce release-signed APKs, so nothing will be published."
           } else {
             Write-Host "::warning::Android signing secrets are not configured ($($missing -join ', ')). Building the unsigned debug variant for compile and lint coverage; no Android artifacts will be staged."
@@ -239,6 +245,26 @@ jobs:
 
       - name: Stage release files
         shell: pwsh
+        env:
+          # Same reason as above: step outputs are read from the environment, never
+          # interpolated into the script body.
+          WINDOWS_SIGNING_AVAILABLE: ${{ steps.signing.outputs.available }}
+          ANDROID_SIGNING_AVAILABLE: ${{ steps.android-signing.outputs.available }}
+          # Repeated here rather than inherited: a step's `env:` block does not survive into
+          # the next step, so the signing invocation below needs the script path and the
+          # credentials in its own scope. Declaring them on the job instead would hand every
+          # step in this job - npm, cargo, gradle - a copy of the signing secret.
+          AETHON_SIGN_SCRIPT: ${{ github.workspace }}/scripts/sign-windows.ps1
+          AETHON_SIGN_METHOD: ${{ secrets.AETHON_SIGN_METHOD }}
+          AETHON_SIGN_TIMESTAMP_URL: ${{ secrets.AETHON_SIGN_TIMESTAMP_URL }}
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AETHON_SIGN_ENDPOINT: ${{ secrets.AETHON_SIGN_ENDPOINT }}
+          AETHON_SIGN_ACCOUNT: ${{ secrets.AETHON_SIGN_ACCOUNT }}
+          AETHON_SIGN_CERT_PROFILE: ${{ secrets.AETHON_SIGN_CERT_PROFILE }}
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
           New-Item -ItemType Directory -Force portable | Out-Null
@@ -264,7 +290,7 @@ jobs:
           Copy-Item src-tauri/binaries/xray-x86_64-pc-windows-msvc.exe portable/xray.exe
           Copy-Item src-tauri/binaries/wintun.dll portable/wintun.dll
           Copy-Item LICENSE,NOTICE.md,TRADEMARK.md,third-party/xray-LICENSE.txt,third-party/wintun-LICENSE.txt portable/
-          if ('${{ steps.signing.outputs.available }}' -eq 'true') {
+          if ($env:WINDOWS_SIGNING_AVAILABLE -eq 'true') {
             & powershell -NoProfile -ExecutionPolicy Bypass -File $env:AETHON_SIGN_SCRIPT `
               "release/Aethon-VPN-v${version}-Windows-x64-Installer.exe" `
               "release/Aethon-VPN-v${version}-Windows-x64.msi" `
@@ -277,7 +303,7 @@ jobs:
           # them produces only debug APKs, which are not distributable and are not staged.
           # The manifest/SHA logic below enumerates whatever landed in `release`,
           # so skipping these is safe.
-          if ('${{ steps.android-signing.outputs.available }}' -eq 'true') {
+          if ($env:ANDROID_SIGNING_AVAILABLE -eq 'true') {
             Copy-Item android/app/build/outputs/apk/release/app-universal-release.apk "release/Aethon-VPN-v${version}-Android-Universal.apk"
             Copy-Item android/app/build/outputs/apk/release/app-armeabi-v7a-release.apk "release/Aethon-VPN-v${version}-Android-ARMv7.apk"
             Copy-Item android/app/build/outputs/apk/release/app-arm64-v8a-release.apk "release/Aethon-VPN-v${version}-Android-ARM64.apk"
@@ -411,15 +437,21 @@ jobs:
       contents: write
     steps:
       - name: Require signed Windows and Android builds
+        env:
+          # Interpolating a job output straight into a shell script is the same shape as the
+          # injection risk the pwsh steps avoid, and `publisher` is derived from a
+          # certificate subject. Both arrive as environment values instead.
+          WINDOWS_SIGNED: ${{ needs.build.outputs.windows-signed }}
+          ANDROID_SIGNED: ${{ needs.build.outputs.android-signed }}
         run: |
-          if [ "${{ needs.build.outputs.windows-signed }}" != "true" ]; then
+          if [ "$WINDOWS_SIGNED" != "true" ]; then
             echo "RELEASE BLOCKED: the Windows signing gate did not pass." >&2
             exit 1
           fi
           # The build job already fails on a tag when the Android secrets are missing, so
           # this is the second lock: it also catches a tag run where the gate was satisfied
           # but no release-signed APKs were actually staged.
-          if [ "${{ needs.build.outputs.android-signed }}" != "true" ]; then
+          if [ "$ANDROID_SIGNED" != "true" ]; then
             echo "RELEASE BLOCKED: the Android packages in this build were not release-signed." >&2
             exit 1
           fi
