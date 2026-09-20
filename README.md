@@ -183,6 +183,51 @@ npm run package:release
 
 This creates Windows x64 installers, portable files, architecture-specific Android packages, checksums, and `Aethon-VPN-v2.1.1-all-platforms.zip` under `release`.
 
+### Release CI secrets
+
+`.github/workflows/release.yml` reads every credential from repository secrets; none are
+committed. Set them with `gh secret set <NAME>` or under Settings → Secrets and variables →
+Actions.
+
+Android release signing — all four are required before a tag can publish:
+
+| Secret | Value |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | The entire `firstham-aethergui.jks`, base64-encoded |
+| `ANDROID_KEYSTORE_PASSWORD` | Keystore (store) password |
+| `ANDROID_KEY_ALIAS` | Alias of the release key inside that keystore |
+| `ANDROID_KEY_PASSWORD` | Password for that alias |
+
+```powershell
+# Produce the secret value, then paste it when gh prompts:
+[Convert]::ToBase64String([IO.File]::ReadAllBytes(".\firstham-aethergui.jks")) | Set-Clipboard
+gh secret set ANDROID_KEYSTORE_BASE64
+```
+
+It must be the *existing* release keystore. `AppUpdateReceiver` compares the installed
+package's signing certificates with the downloaded APK's and refuses the install when they
+differ, so a freshly generated key would break in-app updates for every current install of
+`io.github.hamvex.aethergui`.
+
+Windows signing — either `WINDOWS_CERT_PFX_BASE64` with `WINDOWS_CERT_PASSWORD`, or Azure
+Trusted Signing with `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`,
+`AETHON_SIGN_ENDPOINT`, `AETHON_SIGN_ACCOUNT`, and `AETHON_SIGN_CERT_PROFILE`. Also
+`WINDOWS_PUBLISHER_NAME` (pinned into the binary as the updater's expected signer),
+`WINDOWS_CERT_SUBJECT` (checked by the signing gate), and optionally `AETHON_SIGN_METHOD`
+and `AETHON_SIGN_TIMESTAMP_URL`.
+
+When secrets are absent the workflow degrades rather than guessing:
+
+- Branch and pull request builds warn, skip signing, and still compile everything — Windows
+  unsigned, Android as a debug APK for build and lint coverage. Artifacts are uploaded and
+  nothing is published.
+- Tag builds fail. The Windows signing gate and the Android signing selection both block, and
+  the `publish` job re-checks `windows-signed` and `android-signed` before creating the
+  release, so an unsigned build can never become one.
+
+`linux/release.yml` is the same workflow kept in sync for the Linux job; edit both, or copy
+one over the other as described in `linux/README.md`.
+
 ## Verification
 
 ```powershell
